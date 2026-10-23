@@ -86,6 +86,5 @@ const installer = require('./install-mock.cjs');
   assert(!JSON.stringify(await puffer.evaluate(()=>({...localStorage}))).includes('sk-or-'),'No API key in game storage');
   assert.deepEqual(errors,[],'AI integration should have no page errors');
   console.log('PASS browser AI: unknown-category automatic fallback, unverified/no-score labels, Tab fill, one request, no key in game localStorage. Requests mocked; no real OpenRouter API key used.');
-  await puffer.screenshot({path:'/tmp/krillion-puffer-helper-verified.png'});
   await browser.close();
 })().catch(error=>{console.error(error);process.exit(1)});

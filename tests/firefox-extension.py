@@ -8,7 +8,6 @@ import argparse
 import json
 import re
 import threading
-import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -22,7 +21,6 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--firefox", required=True, help="Firefox executable, not your existing profile")
 parser.add_argument("--geckodriver", required=True)
 parser.add_argument("--violentmonkey", required=True, help="Official Violentmonkey XPI")
-parser.add_argument("--baseline", help="Optional previous userscript that must reproduce the stuck bridge")
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[1]
 
@@ -103,19 +101,6 @@ try:
             "candidates:[...r.querySelectorAll('.candidate')].map(n=>n.textContent)};"
         )
 
-    if args.baseline:
-        baseline = Path(args.baseline).read_text()
-        # Record only message metadata (never message content or credentials).
-        baseline = baseline.replace("window.addEventListener('message', event => {", """window.addEventListener('message', event => {
-  try { if (event.data?.from === 'page') document.documentElement.setAttribute('data-test-old-source', JSON.stringify({sameWindow:event.source === window,sourceNull:event.source === null,origin:event.origin})); } catch {}""", 1)
-        install(baseline)
-        driver.execute_script("document.querySelector('#krillion-io-tab-helper').shadowRoot.querySelector('.ai').click();")
-        time.sleep(0.5)
-        state = ui()
-        print("BASELINE", json.dumps(state), flush=True)
-        print("BASELINE WINDOW METADATA", driver.execute_script("return document.documentElement.getAttribute('data-test-old-source');"), flush=True)
-        assert state["pending"] and "Connecting" in state["status"], "Baseline did not reproduce missing acknowledgement"
-
     production = (root / "dist/krillion-io-helper.user.js").read_text()
     install(production)
     driver.execute_script("document.querySelector('#krillion-io-tab-helper').shadowRoot.querySelector('.ai').click();")
@@ -132,7 +117,7 @@ try:
     field.click()
     field.send_keys(Keys.TAB)
     assert field.get_attribute("value") == "attercop"
-    print("PASS actual Firefox/Violentmonkey: unknown screenshot prompt → mocked free response → 3 unverified candidates → Tab fills attercop", flush=True)
+    print("PASS actual Firefox/Violentmonkey: unknown prompt → mocked free response → 3 unverified candidates → Tab fills attercop", flush=True)
 finally:
     if driver:
         driver.quit()

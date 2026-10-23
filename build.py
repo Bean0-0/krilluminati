@@ -1,5 +1,4 @@
 """Build self-contained Violentmonkey script; no credentials required."""
-import argparse
 import json
 from pathlib import Path
 
@@ -25,8 +24,4 @@ output = output.replace("/* OPENROUTER_SANDBOX */", (root / "src/openrouter-sand
 target = root / "dist/krillion-io-helper.user.js"
 target.parent.mkdir(exist_ok=True)
 target.write_text(output)
-parser = argparse.ArgumentParser()
-parser.add_argument("--install-local", action="store_true", help="Also update ../krillion-io-helper.user.js")
-if parser.parse_args().install_local:
-    (root.parent / target.name).write_text(output)
 print(f"Built {target}: {len(seed)} prompts, {sum(len(p[2]) for p in seed)} samples, {len(output.encode())} bytes")
