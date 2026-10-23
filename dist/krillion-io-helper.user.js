@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Krillion.io — Niche Tab + Puffer
 // @namespace    local.krillion-io-helper
-// @version      2.1.1
+// @version      2.1.2
 // @description  Daily + Puffer Tab completion. Offline banks, public sheets, and optional free OpenRouter fallback. AI guesses unverified; Enter stays manual.
 // @match        https://krillion.io/*
 // @match        https://www.krillion.io/*
@@ -66,7 +66,7 @@ function complete(prompt, maxLength) {
   const hit = cache[cacheKey];
   if (hit && Date.now() - hit.at < maxAge && Array.isArray(hit.answers)) return Promise.resolve(hit);
   if (inFlight.has(cacheKey)) return inFlight.get(cacheKey);
-  if (inFlight.size >= 4) return Promise.reject(new Error('AI queue full. Retry manually shortly.'));
+  if (inFlight.size >= 2) return Promise.reject(new Error('AI queue full. Retry manually shortly.'));
   const pending = queue.then(() => fetchAnswers(prompt, maxLength, cacheKey)).finally(() => inFlight.delete(cacheKey));
   inFlight.set(cacheKey, pending);
   queue = pending.catch(() => {});
@@ -83,9 +83,10 @@ function fetchAnswers(prompt, maxLength, cacheKey) {
   if (usage.filter(time => now - time < 60000).length >= 3) return Promise.reject(new Error('Local limit: 3 AI requests per minute. Wait, then retry.'));
   // Count attempts, including upstream failures. No silent retry, paid model fallback, or plugins.
   GM_setValue('openrouterUsage:v1', [...usage, now]);
+  let control;
   const request = new Promise((resolve, reject) => {
     try {
-      GM_xmlhttpRequest({
+      control = GM_xmlhttpRequest({
         method: 'POST', url: 'https://openrouter.ai/api/v1/chat/completions',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
         anonymous: true, responseType: 'json', timeout: 25000,
@@ -130,14 +131,24 @@ function fetchAnswers(prompt, maxLength, cacheKey) {
       });
     } catch { reject(new Error('Userscript network API unavailable. Check Violentmonkey permissions.')); }
   });
-  return request;
+  // GM timeout callbacks can be absent while extension permission/transport is stuck.
+  let deadline;
+  const watchdog = new Promise((_, reject) => {
+    deadline = setTimeout(() => {
+      reject(new Error('AI network timed out after 26 seconds. Check Violentmonkey permission, then retry.'));
+      try { control?.abort?.(); } catch {}
+    }, 26000);
+  });
+  return Promise.race([request, watchdog]).finally(() => clearTimeout(deadline));
 }
 window.addEventListener('message', event => {
-  if (event.source !== window || event.origin !== location.origin) return;
+  // Firefox privileged extension messages can legitimately have source:null.
+  if ((event.source !== window && event.source !== null) || event.origin !== location.origin) return;
   const value = event.data;
   if (!value || value.channel !== channel || value.from !== 'page' || value.kind !== 'request') return;
   if (typeof value.id !== 'string' || value.id.length > 80 || typeof value.prompt !== 'string'
     || !value.prompt.trim() || value.prompt.length > 400 || ![60, 256].includes(value.maxLength)) return;
+  post({ kind: 'ack', id: value.id, prompt: value.prompt, maxLength: value.maxLength });
   complete(value.prompt.trim(), value.maxLength).then(result => {
     post({ kind: 'result', id: value.id, prompt: value.prompt, maxLength: value.maxLength, answers: result.answers });
   }).catch(error => post({ kind: 'result', id: value.id, prompt: value.prompt, maxLength: value.maxLength, error: error.message }));
@@ -184,16 +195,30 @@ if (!inject()) {
   const aiAnswers = new Map(), aiTasks = new Map();
   const aiKey = (prompt, limit) => JSON.stringify([norm(prompt), limit]);
   let aiConfig = { hasKey: BRIDGE.hasKey, auto: BRIDGE.auto };
+  function clearAITimers(task) {
+    clearTimeout(task.handoff); clearTimeout(task.deadline);
+  }
+  function failAI(key, id, error) {
+    const task = aiTasks.get(key);
+    if (!task || task.id !== id || !task.pending) return;
+    clearAITimers(task); task.pending = false; task.error = error; changed();
+  }
   function requestAI(prompt, maxLength, manual = false) {
     const key = aiKey(prompt, maxLength), previous = aiTasks.get(key);
     if (!prompt || previous?.pending || (!manual && previous)) return;
     const id = crypto.randomUUID();
-    aiTasks.set(key, { id, pending: true, error: '' });
-    window.postMessage({ channel: BRIDGE.channel, from: 'page', kind: 'request', id, prompt, maxLength }, location.origin);
+    const task = { id, pending: true, error: '' };
+    task.handoff = setTimeout(() => failAI(key, id, 'AI bridge did not respond. Reload updated script; check Violentmonkey permissions.'), 5000);
+    task.deadline = setTimeout(() => failAI(key, id, 'AI request timed out after 60 seconds including queue. Retry manually.'), 60000);
+    aiTasks.set(key, task);
+    try {
+      window.postMessage({ channel: BRIDGE.channel, from: 'page', kind: 'request', id, prompt, maxLength }, location.origin);
+    } catch { failAI(key, id, 'AI bridge request failed. Reload updated script.'); }
     changed();
   }
   window.addEventListener('message', event => {
-    if (event.source !== window || event.origin !== location.origin) return;
+    // Firefox strips source from messages crossing a privileged extension boundary.
+    if ((event.source !== window && event.source !== null) || event.origin !== location.origin) return;
     const value = event.data;
     if (!value || value.channel !== BRIDGE.channel || value.from !== 'sandbox') return;
     if (value.kind === 'config') {
@@ -201,10 +226,17 @@ if (!inject()) {
       for (const [key, task] of aiTasks) if (!task.pending && task.error) aiTasks.delete(key);
       changed();
     } else if (value.kind === 'clear') {
+      for (const task of aiTasks.values()) clearAITimers(task);
       aiAnswers.clear(); aiTasks.clear(); changed();
+    } else if (value.kind === 'ack' && typeof value.prompt === 'string') {
+      const task = aiTasks.get(aiKey(value.prompt, value.maxLength));
+      if (task?.id === value.id) {
+        clearTimeout(task.handoff); task.acknowledged = true; changed();
+      }
     } else if (value.kind === 'result' && typeof value.prompt === 'string') {
       const key = aiKey(value.prompt, value.maxLength), task = aiTasks.get(key);
       if (!task || task.id !== value.id) return;
+      clearAITimers(task);
       task.pending = false;
       task.error = typeof value.error === 'string' ? value.error.slice(0, 250) : '';
       if (Array.isArray(value.answers)) aiAnswers.set(key, value.answers.filter(word => typeof word === 'string' && word.length <= 256).slice(0, 12));
@@ -487,7 +519,8 @@ if (!inject()) {
     const task = aiTasks.get(currentAIKey);
     shadow.querySelector('.ai').disabled = Boolean(task?.pending);
     shadow.querySelector('.ai').textContent = task?.pending ? 'AI loading…' : 'AI guesses';
-    shadow.querySelector('.ai-status').textContent = task?.pending ? 'Free model queued/running; network timeout is 25 seconds.'
+    shadow.querySelector('.ai-status').textContent = task?.pending ? (task.acknowledged
+      ? 'Free model queued/running; network timeout is 25 seconds.' : 'Connecting to userscript AI bridge…')
       : task?.error || (!aiConfig.hasKey ? 'Optional AI: set OpenRouter key in Violentmonkey menu.'
         : aiAnswers.has(currentAIKey) ? 'AI guesses are unverified: no acceptance or rarity score claimed.'
         : `Free AI fallback ${aiConfig.auto ? 'automatic for missing banks' : 'manual only'}. Category text sent to OpenRouter/model provider.`);

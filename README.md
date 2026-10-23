@@ -39,7 +39,9 @@ Requests use `dots-studio/dots-3-note-preview:free` through OpenRouter, with rea
 
 Only category text and output constraints are sent to OpenRouter. Player names, room codes, chat, current typed answers, and game credentials are not sent. Provider retention/training policies can vary; review your OpenRouter free-model privacy settings.
 
-AI suggestions are cached in Violentmonkey for seven days, up to 250 prompt/length combinations. Local safeguards allow at most three attempts/minute and 40 attempts/rolling 24 hours; these are best-effort across tabs, not server-side enforcement. Distinct pending requests queue, and failed responses require manual retry. Network timeout: 25 seconds.
+AI suggestions are cached in Violentmonkey for seven days, up to 250 prompt/length combinations. Local safeguards allow at most three attempts/minute and 40 attempts/rolling 24 hours; these are best-effort across tabs, not server-side enforcement. At most two distinct requests may be pending (one running, one queued), and failed responses require manual retry. Network timeout: 25 seconds, plus an independent 26-second watchdog if Violentmonkey never calls back. The page expects a bridge acknowledgement within five seconds and has a final 60-second deadline including queue time. Every failure leaves loading state and re-enables manual retry.
+
+Firefox can expose `source: null` on messages from privileged extension contexts ([MDN](https://developer.mozilla.org/en-US/docs/Web/API/Window/postMessage#using_window.postmessage_in_extensions)). Both bridge ends accept that case while retaining exact-origin, channel, and message-shape checks. The panel distinguishes connecting to the userscript bridge from a queued/running model request.
 
 The key remains in the isolated userscript context and is used only in the extension's HTTPS request to OpenRouter. It is not serialized into injected page code, DOM, game localStorage, exports, or the repository. **The page can see category text and suggestions and can invoke the narrow request bridge. The bridge is not an authentication boundary.** Free-only routing, bounded requests, and local rate safeguards reduce abuse; use a dedicated OpenRouter key and revoke it if needed.
 
@@ -55,7 +57,7 @@ npm run check
 npm test
 ```
 
-`npm test` uses the live public Daily page and read-only Puffer preview fixture, with mocked OpenRouter responses and mocked party events. It does not submit Daily answers, join public matchmaking, create rooms, or use a real API key. Authenticated OpenRouter inference and actual Violentmonkey extension isolation are not covered by these mocks. A separate manual live request verified a valid JSON response in approximately 1.7 seconds with reported cost $0; no credential was saved in project files.
+`npm test` uses the live public Daily page and read-only Puffer preview fixture, with mocked OpenRouter responses and mocked party events. Fast local-fixture regressions also cover Firefox-style `source: null`, rejected foreign origins, a missing bridge, missing userscript network callbacks, and a lost reply after acknowledgement. It does not submit Daily answers, join public matchmaking, create rooms, or use a real API key. Authenticated OpenRouter inference and actual Violentmonkey extension isolation are not covered by these mocks. A separate manual live request verified a valid JSON response in approximately 1.7 seconds with reported cost $0; no credential was saved in project files.
 
 An optional integration test creates a **private** room with two test participants and attempts one normal answer if a matching bank category appears. It is opt-in and can fail when no supported category appears:
 

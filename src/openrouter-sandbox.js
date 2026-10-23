@@ -41,7 +41,7 @@ function complete(prompt, maxLength) {
   const hit = cache[cacheKey];
   if (hit && Date.now() - hit.at < maxAge && Array.isArray(hit.answers)) return Promise.resolve(hit);
   if (inFlight.has(cacheKey)) return inFlight.get(cacheKey);
-  if (inFlight.size >= 4) return Promise.reject(new Error('AI queue full. Retry manually shortly.'));
+  if (inFlight.size >= 2) return Promise.reject(new Error('AI queue full. Retry manually shortly.'));
   const pending = queue.then(() => fetchAnswers(prompt, maxLength, cacheKey)).finally(() => inFlight.delete(cacheKey));
   inFlight.set(cacheKey, pending);
   queue = pending.catch(() => {});
@@ -58,9 +58,10 @@ function fetchAnswers(prompt, maxLength, cacheKey) {
   if (usage.filter(time => now - time < 60000).length >= 3) return Promise.reject(new Error('Local limit: 3 AI requests per minute. Wait, then retry.'));
   // Count attempts, including upstream failures. No silent retry, paid model fallback, or plugins.
   GM_setValue('openrouterUsage:v1', [...usage, now]);
+  let control;
   const request = new Promise((resolve, reject) => {
     try {
-      GM_xmlhttpRequest({
+      control = GM_xmlhttpRequest({
         method: 'POST', url: 'https://openrouter.ai/api/v1/chat/completions',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
         anonymous: true, responseType: 'json', timeout: 25000,
@@ -105,14 +106,24 @@ function fetchAnswers(prompt, maxLength, cacheKey) {
       });
     } catch { reject(new Error('Userscript network API unavailable. Check Violentmonkey permissions.')); }
   });
-  return request;
+  // GM timeout callbacks can be absent while extension permission/transport is stuck.
+  let deadline;
+  const watchdog = new Promise((_, reject) => {
+    deadline = setTimeout(() => {
+      reject(new Error('AI network timed out after 26 seconds. Check Violentmonkey permission, then retry.'));
+      try { control?.abort?.(); } catch {}
+    }, 26000);
+  });
+  return Promise.race([request, watchdog]).finally(() => clearTimeout(deadline));
 }
 window.addEventListener('message', event => {
-  if (event.source !== window || event.origin !== location.origin) return;
+  // Firefox privileged extension messages can legitimately have source:null.
+  if ((event.source !== window && event.source !== null) || event.origin !== location.origin) return;
   const value = event.data;
   if (!value || value.channel !== channel || value.from !== 'page' || value.kind !== 'request') return;
   if (typeof value.id !== 'string' || value.id.length > 80 || typeof value.prompt !== 'string'
     || !value.prompt.trim() || value.prompt.length > 400 || ![60, 256].includes(value.maxLength)) return;
+  post({ kind: 'ack', id: value.id, prompt: value.prompt, maxLength: value.maxLength });
   complete(value.prompt.trim(), value.maxLength).then(result => {
     post({ kind: 'result', id: value.id, prompt: value.prompt, maxLength: value.maxLength, answers: result.answers });
   }).catch(error => post({ kind: 'result', id: value.id, prompt: value.prompt, maxLength: value.maxLength, error: error.message }));
