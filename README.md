@@ -35,7 +35,7 @@ Puffer repeats are excluded only when observed in this session/category. Joining
 
 AI outputs are **unverified guesses**, with **no game score or acceptance claim**. A model can invent facts or propose answers the game's private catalog rejects. Only later normal game events establish Puffer acceptance/tier. Free providers can be slow, rate-limited, or unavailable; a response can arrive after a turn ends.
 
-Requests use only `openrouter/free` with zero maximum prompt/completion/request prices. There are no paid fallback models, plugins, or automatic upstream retries. An OpenRouter key is still required; free quotas and availability are controlled by OpenRouter and its providers.
+Requests use `dots-studio/dots-3-note-preview:free` through OpenRouter, with reasoning disabled and zero maximum prompt/completion/request prices. This model returned valid suggestions in a live $0 test. The random `openrouter/free` router previously selected mandatory-reasoning models that exhausted the output budget without producing answers; pinning a model avoids that failure. There are no paid fallback models, plugins, or automatic upstream retries. An OpenRouter key is still required; free quotas and availability are controlled by OpenRouter and its providers.
 
 Only category text and output constraints are sent to OpenRouter. Player names, room codes, chat, current typed answers, and game credentials are not sent. Provider retention/training policies can vary; review your OpenRouter free-model privacy settings.
 
@@ -55,7 +55,7 @@ npm run check
 npm test
 ```
 
-`npm test` uses the live public Daily page and read-only Puffer preview fixture, with mocked OpenRouter responses and mocked party events. It does not submit Daily answers, join public matchmaking, create rooms, or use a real API key. Authenticated OpenRouter inference and actual Violentmonkey extension isolation are not covered by these mocks.
+`npm test` uses the live public Daily page and read-only Puffer preview fixture, with mocked OpenRouter responses and mocked party events. It does not submit Daily answers, join public matchmaking, create rooms, or use a real API key. Authenticated OpenRouter inference and actual Violentmonkey extension isolation are not covered by these mocks. A separate manual live request verified a valid JSON response in approximately 1.7 seconds with reported cost $0; no credential was saved in project files.
 
 An optional integration test creates a **private** room with two test participants and attempts one normal answer if a matching bank category appears. It is opt-in and can fail when no supported category appears:
 

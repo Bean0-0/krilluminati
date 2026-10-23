@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Krillion.io — Niche Tab + Puffer
 // @namespace    local.krillion-io-helper
-// @version      2.1.0
+// @version      2.1.1
 // @description  Daily + Puffer Tab completion. Offline banks, public sheets, and optional free OpenRouter fallback. AI guesses unverified; Enter stays manual.
 // @match        https://krillion.io/*
 // @match        https://www.krillion.io/*
@@ -90,7 +90,9 @@ function fetchAnswers(prompt, maxLength, cacheKey) {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
         anonymous: true, responseType: 'json', timeout: 25000,
         data: JSON.stringify({
-          model: 'openrouter/free', stream: false, max_tokens: 600,
+          // Random free router can pick mandatory-reasoning models that exhaust the output budget.
+          model: 'dots-studio/dots-3-note-preview:free', stream: false, max_tokens: 1000,
+          reasoning: { enabled: false },
           provider: { require_parameters: true, max_price: { prompt: 0, completion: 0, request: 0 } },
           response_format: { type: 'json_object' },
           messages: [

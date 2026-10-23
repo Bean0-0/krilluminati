@@ -26,7 +26,9 @@ function harness({key=testKey,status=200,content='{"answers":["Painite"," painit
   const request=h.requests[0],body=JSON.parse(request.data);
   assert.equal(request.url,'https://openrouter.ai/api/v1/chat/completions');
   assert.equal(request.headers.Authorization,`Bearer ${testKey}`);
-  assert.equal(body.model,'openrouter/free');
+  assert.equal(body.model,'dots-studio/dots-3-note-preview:free');
+  assert.deepEqual(body.reasoning,{enabled:false});
+  assert.equal(body.max_tokens,1000);
   assert.deepEqual(body.provider.max_price,{prompt:0,completion:0,request:0});
   assert(!body.models&&!body.plugins);
   assert(!h.injected.join('').includes(testKey),'Key must not enter injected page code');
