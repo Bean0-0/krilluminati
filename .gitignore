@@ -1,0 +1,13 @@
+node_modules/
+.env
+.env.*
+!.env.example
+.dev.vars
+*.key
+*.pem
+*.log
+*.zip
+.DS_Store
+__pycache__/
+playwright-report/
+test-results/

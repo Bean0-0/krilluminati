@@ -1,0 +1,473 @@
+// ==UserScript==
+// @name         Krillion.io — Niche Tab + Puffer
+// @namespace    local.krillion-io-helper
+// @version      2.1.0
+// @description  Daily + Puffer Tab completion. Offline banks, public sheets, and optional free OpenRouter fallback. AI guesses unverified; Enter stays manual.
+// @match        https://krillion.io/*
+// @match        https://www.krillion.io/*
+// @run-at       document-start
+// @inject-into  content
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_registerMenuCommand
+// @grant        GM_xmlhttpRequest
+// @connect      openrouter.ai
+// ==/UserScript==
+
+/* Seed attribution: KrillionHQ (2026), Krillion Daily Dive Dataset.
+ * https://github.com/StruggleYang/krillion-dataset
+ * CC BY 4.0: https://creativecommons.org/licenses/by/4.0/
+ * Modified: prompt-indexed autocomplete records; sampled answers, not complete catalogs.
+ * Independent dataset; no game-developer endorsement. Provided as-is.
+ */
+(() => {
+  'use strict';
+  if (window.top !== window.self) return;
+  /* OPENROUTER_SANDBOX */
+  function pageMain(BRIDGE) {
+  'use strict';
+  if (window.top !== window.self || window.__krillionIOTab) return;
+  window.__krillionIOTab = true;
+  const SEED = /* PUFFER_SEED */;
+  const SCORES = { krillion: 100, deepcut: 85, rare: 60, schooler: 30, tooclever: 15, plankton: 10 };
+  const INPUT = 'input.ds-input[aria-label="Your answer"]';
+  const STORE = 'krillion-io-tab:v2';
+  // Do not remove qualifiers or accents: similar prompts can have different answer sets.
+  const norm = value => String(value ?? '').normalize('NFKC').toLocaleLowerCase('en')
+    .replace(/[‘’]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, ' ').trim();
+  const offline = new Map(SEED.map(([text, date, answers]) => [norm(text), { text, date, answers }]));
+  const sheets = new Map(), games = new Map(), requests = new Map(), failures = new Map();
+  const popularity = new Map(), usedByCategory = new Map(), badByCategory = new Map();
+  const originalFetch = window.fetch;
+  let state;
+  try { state = JSON.parse(localStorage.getItem(STORE) || 'null'); } catch {}
+  if (!state || state.version !== 2 || !state.learned || !state.custom) state = { version: 2, learned: {}, custom: {} };
+  let storageWarning = false;
+  let host, shadow, panel, list, status, heading, notes, editor;
+  let activeInput = null, activePrompt = '', activeToken = '', activeMode = '', activeGame = null;
+  let rows = [], selection = -1, cycle = null, applying = false, scheduled = false;
+  let hidden = false, collapsed = false, revision = 0, lastSignature = '';
+  let partyToken = '', partyCategory = '', partyCount = 0;
+  const aiAnswers = new Map(), aiTasks = new Map();
+  const aiKey = (prompt, limit) => JSON.stringify([norm(prompt), limit]);
+  let aiConfig = { hasKey: BRIDGE.hasKey, auto: BRIDGE.auto };
+  function requestAI(prompt, maxLength, manual = false) {
+    const key = aiKey(prompt, maxLength), previous = aiTasks.get(key);
+    if (!prompt || previous?.pending || (!manual && previous)) return;
+    const id = crypto.randomUUID();
+    aiTasks.set(key, { id, pending: true, error: '' });
+    window.postMessage({ channel: BRIDGE.channel, from: 'page', kind: 'request', id, prompt, maxLength }, location.origin);
+    changed();
+  }
+  window.addEventListener('message', event => {
+    if (event.source !== window || event.origin !== location.origin) return;
+    const value = event.data;
+    if (!value || value.channel !== BRIDGE.channel || value.from !== 'sandbox') return;
+    if (value.kind === 'config') {
+      aiConfig = { hasKey: value.hasKey === true, auto: value.auto === true };
+      for (const [key, task] of aiTasks) if (!task.pending && task.error) aiTasks.delete(key);
+      changed();
+    } else if (value.kind === 'clear') {
+      aiAnswers.clear(); aiTasks.clear(); changed();
+    } else if (value.kind === 'result' && typeof value.prompt === 'string') {
+      const key = aiKey(value.prompt, value.maxLength), task = aiTasks.get(key);
+      if (!task || task.id !== value.id) return;
+      task.pending = false;
+      task.error = typeof value.error === 'string' ? value.error.slice(0, 250) : '';
+      if (Array.isArray(value.answers)) aiAnswers.set(key, value.answers.filter(word => typeof word === 'string' && word.length <= 256).slice(0, 12));
+      changed();
+    }
+  });
+
+  function persist() {
+    // Bound learned records; never persist room tokens, player keys, chat, or socket URLs.
+    const prompts = Object.keys(state.learned);
+    if (prompts.length > 500) prompts.slice(0, prompts.length - 500).forEach(key => delete state.learned[key]);
+    try { localStorage.setItem(STORE, JSON.stringify(state)); storageWarning = false; }
+    catch { storageWarning = true; }
+  }
+  function changed() { revision++; schedule(); }
+  function remember(prompt, answer, tier) {
+    if (!prompt || typeof answer !== 'string' || answer.length > 256 || !(tier in SCORES)) return;
+    const key = norm(prompt), word = norm(answer);
+    const bank = state.learned[key] ||= {};
+    bank[word] = [answer, tier];
+    const words = Object.keys(bank);
+    if (words.length > 300) words.slice(0, words.length - 300).forEach(item => delete bank[item]);
+    persist();
+  }
+  function mark(map, token, answer) {
+    if (!token || typeof answer !== 'string') return;
+    if (!map.has(token)) map.set(token, new Set());
+    map.get(token).add(norm(answer));
+    if (map.size > 50) map.delete(map.keys().next().value);
+  }
+
+  function processRoom(tracker, room, events, snapshot) {
+    const previous = tracker.room;
+    if (previous?.gameId !== room.gameId) { tracker.lastSeq = -1; tracker.eventIndex = null; tracker.categories.clear(); }
+    tracker.room = room;
+    if (room.category?.text) tracker.categories.set(room.category.index, room.category.text);
+    // A fresh snapshot may contain old categories. Do not misattribute earlier pass events.
+    if (snapshot && !previous) tracker.eventIndex = null;
+    for (const event of events || []) {
+      if (!Number.isFinite(event.seq) || event.seq <= tracker.lastSeq) continue;
+      tracker.lastSeq = event.seq;
+      if (event.kind === 'category') tracker.eventIndex = event.index;
+      const text = tracker.categories.get(tracker.eventIndex);
+      if (!text) continue;
+      const token = JSON.stringify([room.code, room.gameId, tracker.eventIndex]);
+      if (event.kind === 'pass' && typeof event.answer === 'string') {
+        mark(usedByCategory, token, event.answer);
+        remember(text, event.answer, event.tier);
+      } else if (event.kind === 'reject' && typeof event.text === 'string') {
+        if (event.why === 'repeat') mark(usedByCategory, token, event.text);
+        else if (event.why === 'miss') mark(badByCategory, token, event.text);
+      }
+    }
+    tracker.eventIndex = room.category?.index ?? null;
+    const route = location.pathname.match(/^\/party\/([A-Z]{4})$/i);
+    if (route && route[1].toUpperCase() === String(room.code).toUpperCase()) {
+      partyCategory = room.category?.text || '';
+      partyCount = Number(room.category?.accepted) || 0;
+      partyToken = room.category ? JSON.stringify([room.code, room.gameId, room.category.index]) : '';
+    }
+    changed();
+  }
+  function watchSocket(socket) {
+    const tracker = { room: null, lastSeq: -1, eventIndex: null, categories: new Map() };
+    socket.addEventListener('message', event => {
+      try {
+        if (typeof event.data !== 'string') return;
+        const message = JSON.parse(event.data);
+        if (message.t === 'snap' && message.room) {
+          processRoom(tracker, message.room, message.room.events, true);
+        } else if (message.t === 'patch' && tracker.room) {
+          const patch = message.patch;
+          if (!patch || patch.base !== tracker.room.version) { tracker.room = null; return; }
+          const room = { ...tracker.room, ...patch.set, version: patch.v, now: patch.now };
+          processRoom(tracker, room, patch.eventsAll || patch.events, false);
+        }
+      } catch { /* Observing must never interfere with the game's socket listeners. */ }
+    });
+  }
+  const NativeWebSocket = window.WebSocket;
+  if (NativeWebSocket) {
+    window.WebSocket = class extends NativeWebSocket {
+      constructor(...args) {
+        super(...args);
+        try {
+          const url = new URL(args[0], location.href);
+          if (url.hostname === 'party.krillion.io' && /^\/rooms\/[^/]+\/ws$/.test(url.pathname)) watchSocket(this);
+        } catch {}
+      }
+    };
+  }
+
+  function addSheet(source, data) {
+    const prompts = Array.isArray(data?.prompts) ? data.prompts : data?.rounds;
+    if (!Array.isArray(prompts)) return;
+    const sheet = new Map();
+    for (const prompt of prompts) {
+      if (typeof prompt.text !== 'string' || !Array.isArray(prompt.answers)) continue;
+      const answers = prompt.answers.filter(item => typeof item.answer === 'string' && item.tier in SCORES)
+        .map(item => [item.answer, item.tier]);
+      sheet.set(norm(prompt.text), { text: prompt.text, answers });
+    }
+    sheets.delete(source); sheets.set(source, sheet);
+    while (sheets.size > 8) sheets.delete(sheets.keys().next().value);
+    changed();
+  }
+  async function getJSON(path, headers = {}) {
+    // Only normal same-origin public/game requests. 402/403 are not retried via alternate routes.
+    const response = await originalFetch.call(window, path, { headers, signal: AbortSignal.timeout(12000) });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return response.json();
+  }
+  function loadSheet(source, headers = {}) {
+    if (requests.has(source)) return requests.get(source);
+    const pending = getJSON(source, headers).then(data => { addSheet(source, data); failures.delete(source); })
+      .catch(error => { failures.set(source, error.message); changed(); });
+    requests.set(source, pending);
+    return pending;
+  }
+  function gameSource(url, data) {
+    if (url.pathname === '/api/today' && /^\d{4}-\d{2}-\d{2}$/.test(data.date || '')) {
+      // Never use a preview/correction catalog to suggest answers for the real daily.
+      if (url.searchParams.has('preview')) return null;
+      return `/api/reveal?date=${encodeURIComponent(data.date)}`;
+    }
+    if (/^\/api\/(?:unlimited|archive|packs\/(?:lexicon|movies|sports|geography))\/\d+$/.test(url.pathname)) {
+      return `${url.pathname}/reveal`;
+    }
+    return null;
+  }
+  function ingestGame(url, data, headers) {
+    const source = gameSource(url, data);
+    if (!source || !Array.isArray(data.prompts)) return;
+    games.delete(source);
+    games.set(source, { source, path: url.pathname, date: data.date, prompts: data.prompts });
+    loadSheet(source, headers);
+    if (url.pathname === '/api/today' && !location.pathname.startsWith('/party')) {
+      getJSON(`/api/answer-popularity?date=${encodeURIComponent(data.date)}`).then(value => {
+        if (value.date === data.date && value.prompts && typeof value.prompts === 'object') popularity.set(source, value.prompts);
+        changed();
+      }).catch(() => {});
+    }
+    changed();
+  }
+  // Observe existing game GETs and reveal sheets, without logging credentials or making submissions.
+  window.fetch = function (...args) {
+    let url, headers = {};
+    try {
+      const request = args[0];
+      url = new URL(typeof request === 'string' || request instanceof URL ? request : request.url, location.href);
+      const incoming = new Headers(args[1]?.headers || (request instanceof Request ? request.headers : undefined));
+      const unlock = incoming.get('x-krillion-unlock');
+      if (unlock) headers = { 'x-krillion-unlock': unlock };
+    } catch {}
+    const pending = originalFetch.apply(this, args);
+    if (url?.origin === location.origin && (url.pathname === '/api/today'
+      || /^\/api\/(?:unlimited|archive|packs\/(?:lexicon|movies|sports|geography))\/\d+(?:\/reveal)?$/.test(url.pathname)
+      || url.pathname === '/api/reveal')) {
+      pending.then(response => {
+        if (!response.ok) return;
+        response.clone().json().then(data => {
+          if (url.pathname.endsWith('/reveal') || url.pathname === '/api/reveal') addSheet(url.pathname + url.search, data);
+          else ingestGame(url, data, headers);
+        }).catch(() => {});
+      }).catch(() => {});
+    }
+    return pending;
+  };
+
+  function contextFor(prompt) {
+    const route = location.pathname;
+    const key = norm(prompt);
+    for (const game of Array.from(games.values()).reverse()) {
+      if (route === '/' && game.path !== '/api/today') continue;
+      if (route.startsWith('/party')) continue;
+      const item = game.prompts.find(candidate => norm(candidate.text) === key);
+      if (item) return { ...game, prompt: item };
+    }
+    return null;
+  }
+  function readPrompt() {
+    // The renderer briefly keeps the outgoing card during category transitions.
+    const cards = Array.from(document.querySelectorAll('.ds-card:not(.pf-newcat) .prompt'));
+    return cards.reverse().find(element => element.getClientRects().length)?.textContent.trim() || '';
+  }
+  function candidates(prompt, puffer, input, context) {
+    const key = norm(prompt), bank = new Map();
+    const used = puffer ? usedByCategory.get(activeToken) : null;
+    const bad = puffer ? badByCategory.get(activeToken) : null;
+    const maxLength = input?.maxLength > 0 ? input.maxLength : (puffer ? 60 : 256);
+    function add(answer, tier, source) {
+      if (typeof answer !== 'string' || !answer.trim() || answer.length > maxLength) return;
+      const word = norm(answer);
+      if (used?.has(word) || bad?.has(word)) return;
+      const previous = bank.get(word);
+      if (previous && previous.source === 'Puffer ✓') return;
+      const count = context ? popularity.get(context.source)?.[context.prompt.id]?.[answer] : null;
+      bank.set(word, { answer, tier, score: SCORES[tier] ?? null, source, count: Number.isFinite(count) ? count : null, order: bank.size });
+    }
+    if (puffer) {
+      const seed = offline.get(key);
+      seed?.answers.forEach(([answer, tier]) => add(answer, tier, 'daily sample'));
+      for (const sheet of sheets.values()) sheet.get(key)?.answers.forEach(([answer, tier]) => add(answer, tier, 'daily/pack sheet'));
+      Object.values(state.learned[key] || {}).forEach(([answer, tier]) => add(answer, tier, 'Puffer ✓'));
+    } else {
+      const live = context && sheets.get(context.source)?.get(key);
+      if (live) live.answers.forEach(([answer, tier]) => add(answer, tier, 'sheet'));
+      else offline.get(key)?.answers.forEach(([answer, tier]) => add(answer, tier, 'daily sample'));
+    }
+    (Array.isArray(state.custom[key]) ? state.custom[key] : []).forEach(answer => {
+      if (!bank.has(norm(answer))) add(answer, null, 'custom ?');
+    });
+    (aiAnswers.get(aiKey(prompt, puffer ? 60 : 256)) || []).forEach(answer => {
+      if (!bank.has(norm(answer))) add(answer, null, 'AI guess ?');
+    });
+    return Array.from(bank.values()).sort((a, b) => (b.score ?? -1) - (a.score ?? -1)
+      || (a.score === null && b.score === null ? a.order - b.order : 0)
+      || Number(b.source === 'Puffer ✓') - Number(a.source === 'Puffer ✓')
+      || (a.count ?? Infinity) - (b.count ?? Infinity)
+      || a.answer.localeCompare(b.answer, 'en'));
+  }
+  function filter(all, query) {
+    const prefix = norm(query);
+    if (!prefix) return all;
+    const start = [], contains = [];
+    for (const item of all) {
+      const word = norm(item.answer);
+      if (word.startsWith(prefix)) start.push(item);
+      else if (word.includes(prefix)) contains.push(item);
+    }
+    return start.concat(contains);
+  }
+  function fill(answer) {
+    if (!activeInput?.isConnected || activeInput.disabled || activeInput.readOnly) return false;
+    applying = true;
+    try {
+      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(activeInput, answer);
+      activeInput.dispatchEvent(new Event('input', { bubbles: true }));
+      activeInput.setSelectionRange(answer.length, answer.length);
+    } finally { applying = false; }
+    return true;
+  }
+  function choose(index) {
+    const item = rows[index];
+    if (!item) return;
+    const previous = rows.slice(), query = cycle?.query ?? activeInput.value;
+    if (fill(item.answer)) {
+      cycle = { input: activeInput, token: activeToken, rows: previous, index, value: item.answer, query };
+      selection = index;
+      activeInput.focus();
+      render(true);
+    }
+  }
+  function render(force = false) {
+    if (!panel) return;
+    const input = document.querySelector(INPUT), prompt = readPrompt();
+    const puffer = /^\/party\/[A-Z]{4}$/i.test(location.pathname);
+    const category = document.querySelector('.ds-card:not(.pf-newcat) .rnd')?.textContent || '';
+    const token = puffer ? (norm(partyCategory) === norm(prompt) ? partyToken : `${location.pathname}:${category}:${prompt}`) : `${location.pathname}:${prompt}`;
+    const mode = puffer ? 'Puffer' : 'Daily / packs';
+    const changedPrompt = input !== activeInput || prompt !== activePrompt || token !== activeToken;
+    if (changedPrompt) {
+      activeInput = input; activePrompt = prompt; activeToken = token; activeMode = mode;
+      cycle = null; selection = -1; hidden = false; editor.hidden = true;
+      shadow.querySelector('.edit').textContent = 'Add words';
+    }
+    activeGame = contextFor(prompt);
+    panel.hidden = !prompt || !input || hidden;
+    if (panel.hidden) return;
+    const signature = JSON.stringify([prompt, token, input.value, input.disabled, revision, collapsed, hidden, selection]);
+    if (!force && signature === lastSignature) return;
+    lastSignature = signature;
+    heading.textContent = collapsed ? `${mode} Tab ▸` : `${mode} Tab ▾`;
+    shadow.querySelector('.content').hidden = collapsed;
+    if (collapsed) return;
+    const all = candidates(prompt, puffer, input, activeGame);
+    const loadingSheet = activeGame && requests.has(activeGame.source) && !sheets.has(activeGame.source) && !failures.has(activeGame.source);
+    if (!all.length && !loadingSheet && aiConfig.hasKey && aiConfig.auto) requestAI(prompt, puffer ? 60 : 256);
+    const currentAIKey = aiKey(prompt, puffer ? 60 : 256);
+    const task = aiTasks.get(currentAIKey);
+    shadow.querySelector('.ai').disabled = Boolean(task?.pending);
+    shadow.querySelector('.ai').textContent = task?.pending ? 'AI loading…' : 'AI guesses';
+    shadow.querySelector('.ai-status').textContent = task?.pending ? 'Free model queued/running; network timeout is 25 seconds.'
+      : task?.error || (!aiConfig.hasKey ? 'Optional AI: set OpenRouter key in Violentmonkey menu.'
+        : aiAnswers.has(currentAIKey) ? 'AI guesses are unverified: no acceptance or rarity score claimed.'
+        : `Free AI fallback ${aiConfig.auto ? 'automatic for missing banks' : 'manual only'}. Category text sent to OpenRouter/model provider.`);
+    if (cycle && cycle.input === input && cycle.token === token && cycle.value === input.value) {
+      rows = filter(all, cycle.query);
+      selection = rows.findIndex(item => item.answer === cycle.value);
+      cycle.rows = rows; cycle.index = selection;
+    } else { cycle = null; rows = filter(all, input.value); selection = -1; }
+    const used = usedByCategory.get(token)?.size || 0;
+    status.textContent = `${all.length.toLocaleString()} candidates · ${rows.length.toLocaleString()} matching${puffer ? ` · ${used} observed used` : ''}`;
+    if (puffer && norm(partyCategory) === norm(prompt) && partyCount > used) status.textContent += ` / ${partyCount} total`;
+    if (storageWarning) status.textContent += ' · storage blocked';
+    const error = activeGame && failures.get(activeGame.source);
+    notes.textContent = puffer
+      ? 'Scores from daily/pack sheets unless marked Puffer ✓. Catalogs may differ. Observed repeats hidden; earlier repeats may be unknown.'
+      : error ? `Live sheet unavailable (${error}); samples only.` : 'Highest score first; lower known daily submission count breaks ties. No auto-submit.';
+    list.replaceChildren();
+    if (!rows.length) {
+      const empty = document.createElement('p');
+      empty.textContent = all.length ? 'No matches. Shorten prefix.' : 'No exact bank match yet. Try AI guesses, add words, or learn from normal Puffer passes.';
+      list.append(empty);
+    }
+    const start = Math.max(0, selection - 4);
+    rows.slice(start, start + 8).forEach((item, offset) => {
+      const index = start + offset, button = document.createElement('button');
+      button.type = 'button'; button.className = `candidate${index === selection ? ' selected' : ''}`;
+      button.disabled = input.disabled || input.readOnly;
+      const word = document.createElement('span'); word.textContent = item.answer;
+      const badge = document.createElement('small');
+      badge.textContent = `${item.score ?? '?'} · ${item.source}${item.count !== null ? ` · ${item.count.toLocaleString()} uses` : ''}`;
+      button.title = `${item.answer} — ${item.tier || 'unverified'} (${item.source})`;
+      button.append(word, badge);
+      button.addEventListener('mousedown', event => event.preventDefault());
+      button.addEventListener('click', () => choose(index));
+      list.append(button);
+    });
+  }
+  function schedule() {
+    if (scheduled) return;
+    scheduled = true;
+    requestAnimationFrame(() => { scheduled = false; render(); });
+  }
+  document.addEventListener('input', event => {
+    if (event.target.matches?.(INPUT) && !applying) { cycle = null; selection = -1; hidden = false; schedule(); }
+  }, true);
+  document.addEventListener('focusin', event => {
+    if (event.target.matches?.(INPUT)) { hidden = false; schedule(); }
+  });
+  document.addEventListener('keydown', event => {
+    if (!event.target.matches?.(INPUT) || event.isComposing || event.ctrlKey || event.altKey || event.metaKey) return;
+    if (event.key === 'Escape') { hidden = true; cycle = null; schedule(); return; }
+    if (!['Tab', 'ArrowDown', 'ArrowUp'].includes(event.key) || event.target.disabled) return;
+    hidden = false; collapsed = false; render(true);
+    if (!rows.length) return;
+    event.preventDefault(); event.stopImmediatePropagation();
+    if (event.repeat) return;
+    const backwards = event.key === 'ArrowUp' || (event.key === 'Tab' && event.shiftKey);
+    const index = cycle ? cycle.index : selection;
+    choose(index < 0 ? (backwards ? rows.length - 1 : 0) : (index + (backwards ? -1 : 1) + rows.length) % rows.length);
+  }, true);
+
+  function boot() {
+    host = document.createElement('div'); host.id = 'krillion-io-tab-helper';
+    shadow = host.attachShadow({ mode: 'open' });
+    shadow.innerHTML = `<style>
+      :host { all:initial; position:fixed; right:10px; top:66px; z-index:2147483000; color-scheme:dark; font:12px/1.4 system-ui,sans-serif; }
+      * { box-sizing:border-box; } [hidden] { display:none!important; }
+      section { width:min(330px,calc(100vw - 20px)); color:#e4f3ff; background:#081522f5; border:1px solid #486d84; border-radius:10px; padding:10px; box-shadow:0 4px 28px #0009; }
+      header { display:flex; align-items:center; justify-content:space-between; gap:10px; } button { font:inherit; color:inherit; border:0; border-radius:4px; padding:4px 6px; background:#18374b; cursor:pointer; }
+      button:focus-visible { outline:2px solid #ffd166; } button:disabled { opacity:.6; cursor:default; } header button { background:transparent; font-weight:700; padding:0; }
+      .unofficial { color:#ffd166; font-size:10px; } .status { color:#a7c5d8; font-size:11px; margin:7px 0; }
+      .list { max-height:34vh; overflow:auto; } .candidate { display:flex; flex-direction:column; gap:1px; width:100%; background:transparent; text-align:left; margin:2px 0; overflow-wrap:anywhere; }
+      .candidate small { color:#a7c5d8; font-size:10px; } .candidate.selected,.candidate:hover { background:#224a62; }
+      .candidate.selected small { color:#ffd166; } .hint,.notes,.credit { font-size:10px; color:#a7c5d8; margin:7px 0; } .tools { display:flex; gap:7px; } .tools button { font-size:11px; }
+      a { color:#a7c5d8; } textarea { margin:7px 0; width:100%; height:100px; background:#102536; color:#e4f3ff; font:12px/1.4 monospace; border:1px solid #486d84; }
+      @media(max-width:650px) { :host { top:48px; right:5px; } section { width:240px; } .list { max-height:25vh; } }
+    </style><section hidden aria-label="Krillion autocomplete helper">
+      <header><button type="button" class="heading">Niche Tab ▾</button><span class="unofficial">UNOFFICIAL</span></header>
+      <div class="content"><p class="status"></p><div class="list"></div>
+      <p class="hint">Tab / Shift+Tab cycle · ↑↓ cycle · Enter stays manual · Esc hides. Click header to fold.</p>
+      <p class="notes"></p><p class="ai-status notes"></p><div class="tools"><button type="button" class="ai">AI guesses</button><button type="button" class="edit">Add words</button><button type="button" class="export">Export learned</button></div>
+      <div class="editor" hidden><p>Extra guesses for this exact prompt, one per line. No score implied.</p><textarea aria-label="Custom answers"></textarea><button type="button" class="save">Save</button></div>
+      <p class="credit">Seed: KrillionHQ (2026), <a href="https://github.com/StruggleYang/krillion-dataset" target="_blank" rel="noopener">Daily Dive Dataset</a> · <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>. Converted; incomplete samples.</p></div>
+    </section>`;
+    panel = shadow.querySelector('section'); list = shadow.querySelector('.list'); status = shadow.querySelector('.status');
+    heading = shadow.querySelector('.heading'); notes = shadow.querySelector('.notes'); editor = shadow.querySelector('.editor');
+    heading.addEventListener('click', () => { collapsed = !collapsed; render(true); });
+    shadow.querySelector('.ai').addEventListener('click', () => requestAI(activePrompt, activeMode === 'Puffer' ? 60 : 256, true));
+    shadow.querySelector('.edit').addEventListener('click', () => {
+      editor.hidden = !editor.hidden;
+      shadow.querySelector('.edit').textContent = editor.hidden ? 'Add words' : 'Close editor';
+      if (!editor.hidden) editor.querySelector('textarea').value = (state.custom[norm(activePrompt)] || []).join('\n');
+    });
+    shadow.querySelector('.save').addEventListener('click', () => {
+      state.custom[norm(activePrompt)] = Array.from(new Set(editor.querySelector('textarea').value.split('\n')
+        .map(word => word.trim()).filter(word => word && word.length <= 256))).slice(0, 300);
+      persist(); cycle = null; selection = -1; editor.hidden = true; shadow.querySelector('.edit').textContent = 'Add words'; changed();
+      activeInput?.focus();
+    });
+    shadow.querySelector('.export').addEventListener('click', () => {
+      const url = URL.createObjectURL(new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' }));
+      const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'krillion-puffer-learned.json'; anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    });
+    document.body.append(host);
+    new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['disabled', 'class'] });
+    // Backstop for React value-only updates; signature prevents unnecessary shadow DOM rebuilds.
+    setInterval(schedule, 500);
+    render();
+    if (location.pathname.startsWith('/party')) {
+      getJSON('/api/today').then(data => ingestGame(new URL('/api/today', location.origin), data, {})).catch(() => {});
+    }
+  }
+  if (document.body) boot(); else document.addEventListener('DOMContentLoaded', boot, { once: true });
+  }
+})();
