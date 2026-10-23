@@ -46,6 +46,15 @@ const installer = require('./install-mock.cjs');
   const partyInput=puffer.locator('input[aria-label="Your answer"]');await partyInput.waitFor();
   const partyHelper=puffer.locator('#krillion-io-tab-helper');await partyHelper.locator('.candidate').first().waitFor();
   assert.match(await partyHelper.locator('.candidate').first().innerText(),/Haminados.*100 · daily sample/s);
+  await puffer.waitForFunction(()=>document.querySelector('#krillion-io-tab-helper').dataset.placement==='chat');
+  assert.equal(await partyHelper.evaluate(h=>h.parentElement.matches('.pf-chat')&&h.nextElementSibling?.matches('.pf-chat-in')),true,'Embedded above chat input');
+  // Selected row must stay visible inside the embedded panel even after scrolling it.
+  await partyHelper.locator('.information summary').click();
+  await partyHelper.evaluate(h=>{h.scrollTop=h.scrollHeight;});
+  await partyInput.focus();await partyInput.press('Tab');
+  assert(await partyHelper.evaluate(h=>{const s=h.shadowRoot.querySelector('.candidate.selected').getBoundingClientRect(),c=h.getBoundingClientRect();return s.top>=c.top-1&&s.bottom<=c.bottom+1;}),'Selected suggestion visible');
+  await partyHelper.locator('.information summary').click();
+  await partyInput.fill('');
   await partyInput.focus();await partyInput.press('Tab');assert.equal(await partyInput.inputValue(),'Haminados');
   assert.equal(await partyInput.getAttribute('maxlength'),'60');
   await partyInput.fill('');
@@ -72,7 +81,7 @@ const installer = require('./install-mock.cjs');
     const intercepted=await chat.evaluate(element=>{const event=new KeyboardEvent('keydown',{key:'Tab',bubbles:true,cancelable:true});element.dispatchEvent(event);return event.defaultPrevented;});
     assert.equal(intercepted,false,'Chat Tab must not be intercepted');
   }
-  console.log('PASS Puffer fixture + mocked socket: sampled bank, exact-category match, input limit, snapshots, patch transitions, used exclusions, verified tier learning, category reset, chat isolation.');
+  console.log('PASS Puffer fixture + mocked socket: chat embedding, sampled bank, exact-category match, input limit, snapshots, patch transitions, used exclusions, verified tier learning, category reset, chat isolation.');
   assert.deepEqual(errors,[],'Browser should have no page errors');
   await partyInput.fill('');
   await puffer.locator('.ds-card:not(.pf-newcat) .prompt').last().evaluate(element=>{element.textContent='Name a mystery test mineral';});

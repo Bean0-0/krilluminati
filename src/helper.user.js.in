@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Krillion.io — Niche Tab + Puffer
 // @namespace    local.krillion-io-helper
-// @version      2.1.3
+// @version      2.2.0
 // @description  Daily + Puffer Tab completion. Offline banks, public sheets, and optional free OpenRouter fallback. AI guesses unverified; Enter stays manual.
 // @match        https://krillion.io/*
 // @match        https://www.krillion.io/*
@@ -348,10 +348,32 @@
       render(true);
     }
   }
+  function placePanel(puffer) {
+    const chats = puffer ? Array.from(document.querySelectorAll('.pf-chat')) : [];
+    // Embed only in a visible chat panel (chat can be turned off); otherwise float.
+    const target = chats.find(element => element.getClientRects().length);
+    // Inserting into server HTML before React's hydration commit would corrupt its tree.
+    let fiber = target?.[Object.keys(target).find(key => key.startsWith('__reactFiber$'))];
+    while (fiber?.return) fiber = fiber.return;
+    const chat = fiber?.stateNode?.current?.memoizedState?.isDehydrated === false ? target : null;
+    const parent = chat || document.body;
+    const form = chat?.querySelector('.pf-chat-in');
+    const before = form?.parentElement === parent ? form : null;
+    if (host.parentElement !== parent || (before && host.nextElementSibling !== before)) parent.insertBefore(host, before);
+    const placement = chat ? 'chat' : target ? 'waiting' : 'floating';
+    if (host.dataset.placement !== placement) {
+      host.dataset.placement = placement;
+      shadow.querySelector('.information').open = !chat;
+      shadow.querySelector('.export').textContent = chat ? 'Export' : 'Export learned';
+      lastSignature = '';
+    }
+    return Boolean(chat);
+  }
   function render(force = false) {
     if (!panel) return;
     const input = document.querySelector(INPUT), prompt = readPrompt();
     const puffer = /^\/party\/[A-Z]{4}$/i.test(location.pathname);
+    const embedded = placePanel(puffer);
     const category = document.querySelector('.ds-card:not(.pf-newcat) .rnd')?.textContent || '';
     const token = puffer ? (norm(partyCategory) === norm(prompt) ? partyToken : `${location.pathname}:${category}:${prompt}`) : `${location.pathname}:${prompt}`;
     const mode = puffer ? 'Puffer' : 'Daily / packs';
@@ -362,12 +384,13 @@
       shadow.querySelector('.edit').textContent = 'Add words';
     }
     activeGame = contextFor(prompt);
-    panel.hidden = !prompt || !input || hidden;
+    host.hidden = panel.hidden = !prompt || !input || hidden;
     if (panel.hidden) return;
     const signature = JSON.stringify([prompt, token, input.value, input.disabled, revision, collapsed, hidden, selection]);
     if (!force && signature === lastSignature) return;
     lastSignature = signature;
-    heading.textContent = collapsed ? `${mode} Tab ▸` : `${mode} Tab ▾`;
+    const label = embedded ? 'SUGGESTIONS' : `${mode} Tab`;
+    heading.textContent = `${label} ${collapsed ? '▸' : '▾'}`;
     shadow.querySelector('.content').hidden = collapsed;
     if (collapsed) return;
     const all = candidates(prompt, puffer, input, activeGame);
@@ -382,6 +405,10 @@
       : task?.error || (!aiConfig.hasKey ? 'Optional AI: set OpenRouter key in Violentmonkey menu.'
         : aiAnswers.has(currentAIKey) ? 'AI guesses are unverified: no acceptance or rarity score claimed.'
         : `Free AI fallback ${aiConfig.auto ? 'automatic for missing banks' : 'manual only'}. Category text sent to OpenRouter/model provider.`);
+    if (embedded && !task?.pending && !task?.error) {
+      shadow.querySelector('.ai-status').textContent = !aiConfig.hasKey ? 'AI: set key in Violentmonkey.'
+        : aiAnswers.has(currentAIKey) ? 'AI guesses · unverified' : `AI fallback ${aiConfig.auto ? 'on' : 'manual'}`;
+    }
     if (cycle && cycle.input === input && cycle.token === token && cycle.value === input.value) {
       rows = filter(all, cycle.query);
       selection = rows.findIndex(item => item.answer === cycle.value);
@@ -415,6 +442,18 @@
       button.addEventListener('click', () => choose(index));
       list.append(button);
     });
+    // Keep keyboard selection visible without scrolling chat history or the page.
+    const selected = list.querySelector('.selected');
+    if (selected) {
+      const box = selected.getBoundingClientRect(), viewport = list.getBoundingClientRect();
+      if (box.top < viewport.top) list.scrollTop += box.top - viewport.top;
+      else if (box.bottom > viewport.bottom) list.scrollTop += box.bottom - viewport.bottom;
+      if (embedded) {
+        const row = selected.getBoundingClientRect(), clip = host.getBoundingClientRect();
+        if (row.top < clip.top) host.scrollTop += row.top - clip.top;
+        else if (row.bottom > clip.bottom) host.scrollTop += row.bottom - clip.bottom;
+      }
+    }
   }
   function schedule() {
     if (scheduled) return;
@@ -445,7 +484,7 @@
     shadow = host.attachShadow({ mode: 'open' });
     shadow.innerHTML = `<style>
       :host { all:initial; position:fixed; right:10px; top:66px; z-index:2147483000; color-scheme:dark; font:12px/1.4 system-ui,sans-serif; }
-      * { box-sizing:border-box; } [hidden] { display:none!important; }
+      * { box-sizing:border-box; } [hidden],:host([hidden]) { display:none!important; }
       section { width:min(330px,calc(100vw - 20px)); color:#e4f3ff; background:#081522f5; border:1px solid #486d84; border-radius:10px; padding:10px; box-shadow:0 4px 28px #0009; }
       header { display:flex; align-items:center; justify-content:space-between; gap:10px; } button { font:inherit; color:inherit; border:0; border-radius:4px; padding:4px 6px; background:#18374b; cursor:pointer; }
       button:focus-visible { outline:2px solid #ffd166; } button:disabled { opacity:.6; cursor:default; } header button { background:transparent; font-weight:700; padding:0; }
@@ -454,17 +493,36 @@
       .candidate small { color:#a7c5d8; font-size:10px; } .candidate.selected,.candidate:hover { background:#224a62; }
       .candidate.selected small { color:#ffd166; } .hint,.notes,.credit { font-size:10px; color:#a7c5d8; margin:7px 0; } .tools { display:flex; gap:7px; } .tools button { font-size:11px; }
       a { color:#a7c5d8; } textarea { margin:7px 0; width:100%; height:100px; background:#102536; color:#e4f3ff; font:12px/1.4 monospace; border:1px solid #486d84; }
+      :host([data-placement="waiting"]) { display:none; }
+      .information summary { cursor:pointer; color:#a7c5d8; }
+      :host(:not([data-placement="chat"])) .information summary { display:none; }
       @media(max-width:650px) { :host { top:48px; right:5px; } section { width:240px; } .list { max-height:25vh; } }
+      :host([data-placement="chat"]) { position:relative; inset:auto; z-index:auto; display:block; width:100%; min-height:0; max-height:50%; flex:0 1 auto; overflow:auto; overscroll-behavior:contain; margin-top:8px; padding-top:8px; border-top:1px dashed #1b3050; font:inherit; color:inherit; }
+      :host([data-placement="chat"]) section { width:100%; padding:0; background:transparent; color:inherit; border:0; border-radius:0; box-shadow:none; font:inherit; font-size:14px; line-height:1.2; }
+      :host([data-placement="chat"]) header { gap:4px; }
+      :host([data-placement="chat"]) .heading { font-size:15px; font-weight:400; letter-spacing:2px; }
+      :host([data-placement="chat"]) .unofficial { display:none; }
+      :host([data-placement="chat"]) .status,:host([data-placement="chat"]) .ai-status { font-size:14px; line-height:1.15; margin:5px 0; color:#8fa3c4; }
+      :host([data-placement="chat"]) .list { position:relative; max-height:min(144px,20dvh); overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; }
+      :host([data-placement="chat"]) .candidate { font-size:16px; line-height:1.05; padding:4px 6px; margin:0; border-radius:0; border-left:2px solid transparent; }
+      :host([data-placement="chat"]) .candidate small { font-size:12px; color:#8fa3c4; }
+      :host([data-placement="chat"]) .candidate.selected,:host([data-placement="chat"]) .candidate:hover { background:#102d43; border-left-color:#4de3ff; }
+      :host([data-placement="chat"]) .candidate.selected small { color:#4de3ff; }
+      :host([data-placement="chat"]) .tools { flex-wrap:wrap; gap:4px; }
+      :host([data-placement="chat"]) .tools button,:host([data-placement="chat"]) .save { font-size:14px; padding:3px 5px; background:#101d33; border-radius:0; }
+      :host([data-placement="chat"]) .information { margin-top:5px; font-size:13px; }
+      :host([data-placement="chat"]) .hint,:host([data-placement="chat"]) .notes,:host([data-placement="chat"]) .credit { font-size:13px; color:#8fa3c4; }
+      :host([data-placement="chat"]) textarea { font-family:inherit; font-size:16px; }
     </style><section hidden aria-label="Krillion autocomplete helper">
       <header><button type="button" class="heading">Niche Tab ▾</button><span class="unofficial">UNOFFICIAL</span></header>
       <div class="content"><p class="status"></p><div class="list"></div>
-      <p class="hint">Tab / Shift+Tab cycle · ↑↓ cycle · Enter stays manual · Esc hides. Click header to fold.</p>
-      <p class="notes"></p><p class="ai-status notes"></p><div class="tools"><button type="button" class="ai">AI guesses</button><button type="button" class="edit">Add words</button><button type="button" class="export">Export learned</button></div>
+      <p class="ai-status notes"></p><div class="tools"><button type="button" class="ai">AI guesses</button><button type="button" class="edit">Add words</button><button type="button" class="export">Export learned</button></div>
       <div class="editor" hidden><p>Extra guesses for this exact prompt, one per line. No score implied.</p><textarea aria-label="Custom answers"></textarea><button type="button" class="save">Save</button></div>
-      <p class="credit">Seed: KrillionHQ (2026), <a href="https://github.com/StruggleYang/krillion-dataset" target="_blank" rel="noopener">Daily Dive Dataset</a> · <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>. Converted; incomplete samples.</p></div>
+      <details class="information" open><summary>Help &amp; data</summary><p class="hint">Tab / Shift+Tab cycle · ↑↓ cycle · Enter stays manual · Esc hides. Click header to fold.</p>
+      <p class="notes"></p><p class="credit">Seed: KrillionHQ (2026), <a href="https://github.com/StruggleYang/krillion-dataset" target="_blank" rel="noopener">Daily Dive Dataset</a> · <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>. Converted; incomplete samples.</p></details></div>
     </section>`;
     panel = shadow.querySelector('section'); list = shadow.querySelector('.list'); status = shadow.querySelector('.status');
-    heading = shadow.querySelector('.heading'); notes = shadow.querySelector('.notes'); editor = shadow.querySelector('.editor');
+    heading = shadow.querySelector('.heading'); notes = shadow.querySelector('.information .notes'); editor = shadow.querySelector('.editor');
     heading.addEventListener('click', () => { collapsed = !collapsed; render(true); });
     shadow.querySelector('.ai').addEventListener('click', () => requestAI(activePrompt, activeMode === 'Puffer' ? 60 : 256, true));
     shadow.querySelector('.edit').addEventListener('click', () => {
@@ -485,6 +543,7 @@
     });
     document.body.append(host);
     new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['disabled', 'class'] });
+    window.addEventListener('resize', schedule);
     // Backstop for React value-only updates; signature prevents unnecessary shadow DOM rebuilds.
     setInterval(schedule, 500);
     render();

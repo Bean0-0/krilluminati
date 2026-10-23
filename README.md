@@ -14,14 +14,14 @@ For AI suggestions, add an [OpenRouter API key](https://openrouter.ai/settings/k
 
 - **Tab / Shift+Tab** or **↓ / ↑**: cycle suggestions.
 - **Enter**: submit normally. Nothing is submitted automatically.
-- **Escape**: hide the panel.
+- **Escape**: hide the panel. In Puffer it sits inside the chat box.
 - **AI guesses**: request suggestions for the current category.
 - **Add words**: save your own guesses.
 - **Export learned**: download learned answers and custom words.
 
 Suggestions come from public answer sheets, historical samples, and accepted answers seen while playing. Known scores rank first. Puffer may use a different answer catalog; AI and custom guesses are unverified. Answers already used are excluded when observed, but joining mid-round can miss earlier answers.
 
-AI fallback runs for unknown categories, not on each keystroke. It can be switched off in the Violentmonkey menu.
+AI fallback runs for unknown categories, not on each keystroke, and lists the most niche guesses first. It can be switched off in the Violentmonkey menu.
 
 ## Privacy
 

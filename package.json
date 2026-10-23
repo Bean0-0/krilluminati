@@ -1,6 +1,6 @@
 {
   "name": "krilluminati",
-  "version": "2.1.3",
+  "version": "2.2.0",
   "private": true,
   "description": "Violentmonkey autocomplete for Krillion.io with optional free OpenRouter guesses",
   "scripts": {
