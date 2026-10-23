@@ -3,7 +3,6 @@ const assert=require('node:assert/strict');
 const installer=require('./install-mock.cjs');
 (async()=>{
  const browser=await chromium.launch({headless:true});
- const sourceNull=`window.postMessage=(data,targetOrigin)=>{if(targetOrigin!==location.origin)return;setTimeout(()=>window.dispatchEvent(new MessageEvent('message',{data,origin:location.origin,source:null})),0);};`;
  const fastTimers=`const nativeTimeout=window.setTimeout.bind(window);window.setTimeout=(fn,ms,...args)=>nativeTimeout(fn,ms>=60000?150:ms>=25000?65:ms>=5000?40:ms,...args);`;
  async function fixture(prefix){
   const context=await browser.newContext();context.setDefaultTimeout(2000);
@@ -19,29 +18,33 @@ const installer=require('./install-mock.cjs');
   await page.waitForFunction(value=>document.querySelector('#krillion-io-tab-helper')?.shadowRoot.querySelector('.ai-status')?.textContent.includes(value),text,{timeout:2000});
  }
  try{
-  // MDN: Firefox privileged extension postMessage can expose source:null.
-  const normal=await fixture(sourceNull);
+  const normal=await fixture(`window.postMessage=()=>{throw new Error('window messaging unavailable');};window.__domMessages=[];const send=document.dispatchEvent.bind(document);document.dispatchEvent=event=>{if(event.type.startsWith('krillion-ai-'))window.__domMessages.push({type:event.type,detail:event.detail});return send(event);};`);
   await normal.root.locator('.candidate').first().waitFor();
-  assert.equal(await normal.page.evaluate(()=>window.__aiTestRequests.length),1,'Firefox source:null must reach sandbox instead of staying AI loading');
+  assert.equal(await normal.page.evaluate(()=>window.__aiTestRequests.length),1);
   assert.match(await normal.root.locator('.candidate').first().innerText(),/Painite.*AI guess/s);
   assert.equal(await normal.root.locator('.ai').isDisabled(),false);
-  console.log('PASS Firefox-style source:null request/result bridge.');
+  const messages=await normal.page.evaluate(()=>window.__domMessages);
+  assert(messages.length>=3&&messages.every(message=>typeof message.detail==='string'),'Only JSON strings cross DOM boundary');
+  await normal.page.evaluate(()=>{
+    const request=window.__domMessages.find(item=>JSON.parse(item.detail).from==='page');
+    const data=JSON.parse(request.detail);
+    document.dispatchEvent(new CustomEvent(request.type,{detail:data}));
+    document.dispatchEvent(new CustomEvent(request.type,{detail:'not json'}));
+    document.dispatchEvent(new CustomEvent(request.type,{detail:JSON.stringify({...data,channel:'wrong-channel',id:'other'})}));
+  });
+  await normal.page.waitForTimeout(80);
+  assert.equal(await normal.page.evaluate(()=>window.__aiTestRequests.length),1,'Reject object details, malformed JSON and wrong channels');
+  console.log('PASS string-only DOM bridge with window.postMessage unavailable; malformed/object/channel validation.');
   await normal.context.close();
 
-  const foreign=await fixture(sourceNull.replace('origin:location.origin',"origin:'https://not-krillion.invalid'")+fastTimers);
-  await statusContains(foreign.page,'AI bridge did not respond');
-  assert.equal(await foreign.page.evaluate(()=>window.__aiTestRequests.length),0,'Origin checks must still reject foreign messages even with source:null');
-  console.log('PASS source:null exception retains exact-origin restriction.');
-  await foreign.context.close();
-
-  const lost=await fixture(fastTimers+'window.postMessage=()=>{};');
+  const lost=await fixture(fastTimers+`const send=document.dispatchEvent.bind(document);document.dispatchEvent=event=>event.type.startsWith('krillion-ai-')?true:send(event);`);
   await statusContains(lost.page,'AI bridge did not respond');
   assert.equal(await lost.root.locator('.ai').isDisabled(),false);
   assert.equal(await lost.page.evaluate(()=>window.__aiTestRequests.length),0);
   console.log('PASS lost bridge: loading ends with permission/reload error, manual retry enabled.');
   await lost.context.close();
 
-  const stalled=await fixture(sourceNull+fastTimers+'const timed=window.setTimeout;window.setTimeout=(fn,ms,...args)=>ms===50?0:timed(fn,ms,...args);');
+  const stalled=await fixture(fastTimers+'const timed=window.setTimeout;window.setTimeout=(fn,ms,...args)=>ms===50?0:timed(fn,ms,...args);');
   await statusContains(stalled.page,'AI network timed out');
   assert.equal(await stalled.root.locator('.ai').isDisabled(),false);
   await stalled.root.locator('.ai').click();
@@ -50,7 +53,7 @@ const installer=require('./install-mock.cjs');
   console.log('PASS missing GM callbacks: independent network watchdog releases queue, retry works.');
   await stalled.context.close();
 
-  const missingReply=await fixture(sourceNull+fastTimers+`const transport=window.postMessage;window.postMessage=(data,origin)=>{if(data.from==='sandbox'&&data.kind==='result')return;transport(data,origin);};`);
+  const missingReply=await fixture(fastTimers+`const send=document.dispatchEvent.bind(document);document.dispatchEvent=event=>{if(event.type.startsWith('krillion-ai-')&&typeof event.detail==='string'&&JSON.parse(event.detail).kind==='result')return true;return send(event);};`);
   await statusContains(missingReply.page,'60 seconds including queue');
   assert.equal(await missingReply.root.locator('.ai').isDisabled(),false);
   console.log('PASS lost result after acknowledgement: final page deadline exits loading.');

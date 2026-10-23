@@ -41,7 +41,7 @@ Only category text and output constraints are sent to OpenRouter. Player names, 
 
 AI suggestions are cached in Violentmonkey for seven days, up to 250 prompt/length combinations. Local safeguards allow at most three attempts/minute and 40 attempts/rolling 24 hours; these are best-effort across tabs, not server-side enforcement. At most two distinct requests may be pending (one running, one queued), and failed responses require manual retry. Network timeout: 25 seconds, plus an independent 26-second watchdog if Violentmonkey never calls back. The page expects a bridge acknowledgement within five seconds and has a final 60-second deadline including queue time. Every failure leaves loading state and re-enables manual retry.
 
-Firefox can expose `source: null` on messages from privileged extension contexts ([MDN](https://developer.mozilla.org/en-US/docs/Web/API/Window/postMessage#using_window.postmessage_in_extensions)). Both bridge ends accept that case while retaining exact-origin, channel, and message-shape checks. The panel distinguishes connecting to the userscript bridge from a queued/running model request.
+The page/userscript bridge uses document-level `CustomEvent`s containing **JSON strings only**, not `window.postMessage` objects or cross-realm object identity checks. An actual Firefox 158.0.1 + Violentmonkey 2.49.0 reproduction showed that the old message's `source` was neither the userscript's virtual `window` nor `null`, so both earlier source guards discarded legitimate requests. This avoids Firefox userscript/Xray wrapper assumptions; Firefox explicitly restricts non-string event detail across extension/page boundaries ([MDN](https://developer.mozilla.org/en-US/docs/Web/API/CustomEvent)). Each direction has its own random event name, bounded payloads, channel/shape validation, and request IDs. Same-page code can observe/invoke this bridge; it is not authentication. The panel distinguishes connecting to the userscript bridge from a queued/running model request.
 
 The key remains in the isolated userscript context and is used only in the extension's HTTPS request to OpenRouter. It is not serialized into injected page code, DOM, game localStorage, exports, or the repository. **The page can see category text and suggestions and can invoke the narrow request bridge. The bridge is not an authentication boundary.** Free-only routing, bounded requests, and local rate safeguards reduce abuse; use a dedicated OpenRouter key and revoke it if needed.
 
@@ -57,7 +57,24 @@ npm run check
 npm test
 ```
 
-`npm test` uses the live public Daily page and read-only Puffer preview fixture, with mocked OpenRouter responses and mocked party events. Fast local-fixture regressions also cover Firefox-style `source: null`, rejected foreign origins, a missing bridge, missing userscript network callbacks, and a lost reply after acknowledgement. It does not submit Daily answers, join public matchmaking, create rooms, or use a real API key. Authenticated OpenRouter inference and actual Violentmonkey extension isolation are not covered by these mocks. A separate manual live request verified a valid JSON response in approximately 1.7 seconds with reported cost $0; no credential was saved in project files.
+`npm test` uses the live public Daily page and read-only Puffer preview fixture, with mocked OpenRouter responses and mocked party events. Fast local-fixture regressions also cover disabled `window.postMessage`, string-only DOM payloads, rejected malformed/object/wrong-channel messages, a missing bridge, missing userscript network callbacks, and a lost reply after acknowledgement. It does not submit Daily answers, join public matchmaking, create rooms, or use a real API key. Authenticated OpenRouter inference and actual Violentmonkey extension isolation are not covered by these mocks. A separate manual live request verified a valid JSON response in approximately 1.7 seconds with reported cost $0; no credential was saved in project files.
+
+### Actual Firefox + Violentmonkey regression
+
+Unlike the same-context browser mocks, this test starts a separate temporary Firefox profile and installs the real extension. It verifies actual GM missing-key handling, then mocks only key lookup/network completion inside the installed script while exercising the real userscript sandbox, page injection, string bridge, unknown prompt, candidate rendering, and Tab completion. No real credential or live inference is used. Your normal browser profile is untouched.
+
+Provide a Firefox binary, geckodriver, and the official Violentmonkey XPI downloaded from Mozilla Add-ons:
+
+```sh
+python3 -m venv .venv-firefox
+.venv-firefox/bin/pip install -r tests/requirements-firefox.txt
+.venv-firefox/bin/python tests/firefox-extension.py \
+  --firefox "$FIREFOX_BIN" \
+  --geckodriver "$GECKODRIVER_BIN" \
+  --violentmonkey "$VIOLENTMONKEY_XPI"
+```
+
+Optional `--baseline /path/to/v2.1.2.user.js` first reproduces the old missing-acknowledgement failure in the same real extension setup. This regression passed using the screenshot's exact prompt: `Name an English word containing "atter"`.
 
 An optional integration test creates a **private** room with two test participants and attempts one normal answer if a matching bank category appears. It is opt-in and can fail when no supported category appears:
 

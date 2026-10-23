@@ -1,5 +1,6 @@
 // Runs in Violentmonkey's isolated content world. Never inject GM APIs or API key into page.
 const channel = `krillion-ai-${crypto.randomUUID()}`;
+const toSandbox = `${channel}:request`, toPage = `${channel}:response`;
 const normalized = value => value.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
 const keyName = 'openrouterKey';
 const cacheName = 'openrouterCache:v1';
@@ -10,7 +11,10 @@ let queue = Promise.resolve();
 const maxAge = 7 * 86400000;
 const maxReply = 100000;
 const config = () => ({ hasKey: Boolean(GM_getValue(keyName, '')), auto: GM_getValue('openrouterAuto', true) === true });
-function post(message) { window.postMessage({ channel, from: 'sandbox', ...message }, location.origin); }
+function post(message) {
+  // Primitive strings cross Firefox Xray/userscript boundaries; objects can be denied.
+  document.dispatchEvent(new CustomEvent(toPage, { detail: JSON.stringify({ channel, from: 'sandbox', ...message }) }));
+}
 function configureKey() {
   const value = window.prompt('OpenRouter API key. Stored only in Violentmonkey. Never committed or sent to Krillion. Leave blank to remove key.');
   if (value === null) return;
@@ -116,10 +120,10 @@ function fetchAnswers(prompt, maxLength, cacheKey) {
   });
   return Promise.race([request, watchdog]).finally(() => clearTimeout(deadline));
 }
-window.addEventListener('message', event => {
-  // Firefox privileged extension messages can legitimately have source:null.
-  if ((event.source !== window && event.source !== null) || event.origin !== location.origin) return;
-  const value = event.data;
+document.addEventListener(toSandbox, event => {
+  if (typeof event.detail !== 'string' || event.detail.length > 4096) return;
+  let value;
+  try { value = JSON.parse(event.detail); } catch { return; }
   if (!value || value.channel !== channel || value.from !== 'page' || value.kind !== 'request') return;
   if (typeof value.id !== 'string' || value.id.length > 80 || typeof value.prompt !== 'string'
     || !value.prompt.trim() || value.prompt.length > 400 || ![60, 256].includes(value.maxLength)) return;
@@ -134,7 +138,7 @@ function inject() {
   const root = document.documentElement;
   if (!root) return false;
   const script = document.createElement('script');
-  script.textContent = `(${pageMain.toString()})(${JSON.stringify({ channel, ...config() })});`;
+  script.textContent = `(${pageMain.toString()})(${JSON.stringify({ channel, toSandbox, toPage, ...config() })});`;
   root.append(script); script.remove();
   return true;
 }

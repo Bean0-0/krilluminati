@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Krillion.io — Niche Tab + Puffer
 // @namespace    local.krillion-io-helper
-// @version      2.1.2
+// @version      2.1.3
 // @description  Daily + Puffer Tab completion. Offline banks, public sheets, and optional free OpenRouter fallback. AI guesses unverified; Enter stays manual.
 // @match        https://krillion.io/*
 // @match        https://www.krillion.io/*
@@ -68,14 +68,16 @@
     task.deadline = setTimeout(() => failAI(key, id, 'AI request timed out after 60 seconds including queue. Retry manually.'), 60000);
     aiTasks.set(key, task);
     try {
-      window.postMessage({ channel: BRIDGE.channel, from: 'page', kind: 'request', id, prompt, maxLength }, location.origin);
+      document.dispatchEvent(new CustomEvent(BRIDGE.toSandbox, {
+        detail: JSON.stringify({ channel: BRIDGE.channel, from: 'page', kind: 'request', id, prompt, maxLength }),
+      }));
     } catch { failAI(key, id, 'AI bridge request failed. Reload updated script.'); }
     changed();
   }
-  window.addEventListener('message', event => {
-    // Firefox strips source from messages crossing a privileged extension boundary.
-    if ((event.source !== window && event.source !== null) || event.origin !== location.origin) return;
-    const value = event.data;
+  document.addEventListener(BRIDGE.toPage, event => {
+    if (typeof event.detail !== 'string' || event.detail.length > 100000) return;
+    let value;
+    try { value = JSON.parse(event.detail); } catch { return; }
     if (!value || value.channel !== BRIDGE.channel || value.from !== 'sandbox') return;
     if (value.kind === 'config') {
       aiConfig = { hasKey: value.hasKey === true, auto: value.auto === true };

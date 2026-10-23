@@ -11,7 +11,9 @@ function harness({key=testKey,status=200,never=false,fastTimers=false,content='{
   const window={addEventListener:(type,fn)=>listeners.push(fn),postMessage:data=>messages.push(data),prompt:()=>null,alert:()=>{}};
   const ctx={window,location:{origin:'https://krillion.io'},crypto:{randomUUID},Promise,Date,Map,Set,JSON,
     setTimeout:(fn,ms)=>setTimeout(fn,fastTimers&&ms>=25000?20:ms),clearTimeout,
-    document:{documentElement:{append:node=>injected.push(node.textContent)},createElement:()=>({textContent:'',remove(){}})},
+    CustomEvent:class {constructor(type,{detail}){this.type=type;this.detail=detail;}},
+    document:{documentElement:{append:node=>injected.push(node.textContent)},createElement:()=>({textContent:'',remove(){}}),
+      addEventListener:(type,fn)=>listeners.push({type,fn}),dispatchEvent:event=>messages.push({type:event.type,detail:event.detail})},
     GM_getValue:(key,fallback)=>values.has(key)?values.get(key):fallback,
     GM_setValue:(key,value)=>values.set(key,value),GM_registerMenuCommand:()=>{},
     GM_xmlhttpRequest:details=>{requests.push(details);if(!never)setTimeout(()=>details.onload({status,response:{choices:[{message:{content}}]}}),delay);return {abort(){}};},

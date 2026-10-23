@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Krillion.io — Niche Tab + Puffer
 // @namespace    local.krillion-io-helper
-// @version      2.1.2
+// @version      2.1.3
 // @description  Daily + Puffer Tab completion. Offline banks, public sheets, and optional free OpenRouter fallback. AI guesses unverified; Enter stays manual.
 // @match        https://krillion.io/*
 // @match        https://www.krillion.io/*
@@ -25,6 +25,7 @@
   if (window.top !== window.self) return;
   // Runs in Violentmonkey's isolated content world. Never inject GM APIs or API key into page.
 const channel = `krillion-ai-${crypto.randomUUID()}`;
+const toSandbox = `${channel}:request`, toPage = `${channel}:response`;
 const normalized = value => value.normalize('NFKC').toLowerCase().replace(/\s+/g, ' ').trim();
 const keyName = 'openrouterKey';
 const cacheName = 'openrouterCache:v1';
@@ -35,7 +36,10 @@ let queue = Promise.resolve();
 const maxAge = 7 * 86400000;
 const maxReply = 100000;
 const config = () => ({ hasKey: Boolean(GM_getValue(keyName, '')), auto: GM_getValue('openrouterAuto', true) === true });
-function post(message) { window.postMessage({ channel, from: 'sandbox', ...message }, location.origin); }
+function post(message) {
+  // Primitive strings cross Firefox Xray/userscript boundaries; objects can be denied.
+  document.dispatchEvent(new CustomEvent(toPage, { detail: JSON.stringify({ channel, from: 'sandbox', ...message }) }));
+}
 function configureKey() {
   const value = window.prompt('OpenRouter API key. Stored only in Violentmonkey. Never committed or sent to Krillion. Leave blank to remove key.');
   if (value === null) return;
@@ -141,10 +145,10 @@ function fetchAnswers(prompt, maxLength, cacheKey) {
   });
   return Promise.race([request, watchdog]).finally(() => clearTimeout(deadline));
 }
-window.addEventListener('message', event => {
-  // Firefox privileged extension messages can legitimately have source:null.
-  if ((event.source !== window && event.source !== null) || event.origin !== location.origin) return;
-  const value = event.data;
+document.addEventListener(toSandbox, event => {
+  if (typeof event.detail !== 'string' || event.detail.length > 4096) return;
+  let value;
+  try { value = JSON.parse(event.detail); } catch { return; }
   if (!value || value.channel !== channel || value.from !== 'page' || value.kind !== 'request') return;
   if (typeof value.id !== 'string' || value.id.length > 80 || typeof value.prompt !== 'string'
     || !value.prompt.trim() || value.prompt.length > 400 || ![60, 256].includes(value.maxLength)) return;
@@ -159,7 +163,7 @@ function inject() {
   const root = document.documentElement;
   if (!root) return false;
   const script = document.createElement('script');
-  script.textContent = `(${pageMain.toString()})(${JSON.stringify({ channel, ...config() })});`;
+  script.textContent = `(${pageMain.toString()})(${JSON.stringify({ channel, toSandbox, toPage, ...config() })});`;
   root.append(script); script.remove();
   return true;
 }
@@ -212,14 +216,16 @@ if (!inject()) {
     task.deadline = setTimeout(() => failAI(key, id, 'AI request timed out after 60 seconds including queue. Retry manually.'), 60000);
     aiTasks.set(key, task);
     try {
-      window.postMessage({ channel: BRIDGE.channel, from: 'page', kind: 'request', id, prompt, maxLength }, location.origin);
+      document.dispatchEvent(new CustomEvent(BRIDGE.toSandbox, {
+        detail: JSON.stringify({ channel: BRIDGE.channel, from: 'page', kind: 'request', id, prompt, maxLength }),
+      }));
     } catch { failAI(key, id, 'AI bridge request failed. Reload updated script.'); }
     changed();
   }
-  window.addEventListener('message', event => {
-    // Firefox strips source from messages crossing a privileged extension boundary.
-    if ((event.source !== window && event.source !== null) || event.origin !== location.origin) return;
-    const value = event.data;
+  document.addEventListener(BRIDGE.toPage, event => {
+    if (typeof event.detail !== 'string' || event.detail.length > 100000) return;
+    let value;
+    try { value = JSON.parse(event.detail); } catch { return; }
     if (!value || value.channel !== BRIDGE.channel || value.from !== 'sandbox') return;
     if (value.kind === 'config') {
       aiConfig = { hasKey: value.hasKey === true, auto: value.auto === true };
