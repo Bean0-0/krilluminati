@@ -1,6 +1,6 @@
 # Krilluminati
 
-Tab completion for [Krillion](https://krillion.io/), including Puffer.
+Tab completion for [Krillion](https://krillion.io/).
 
 ## Install
 
