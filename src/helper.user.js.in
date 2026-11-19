@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Krillion.io — Niche Tab + Puffer
+// @name         Krillion.io — Common Tab + Puffer
 // @namespace    local.krillion-io-helper
-// @version      2.2.0
+// @version      2.4.0
 // @description  Daily + Puffer Tab completion. Offline banks, public sheets, and optional free OpenRouter fallback. AI guesses unverified; Enter stays manual.
 // @match        https://krillion.io/*
 // @match        https://www.krillion.io/*
@@ -43,7 +43,7 @@
   try { state = JSON.parse(localStorage.getItem(STORE) || 'null'); } catch {}
   if (!state || state.version !== 2 || !state.learned || !state.custom) state = { version: 2, learned: {}, custom: {} };
   let storageWarning = false;
-  let host, shadow, panel, list, status, heading, notes, editor;
+  let host, shadow, panel, list, rarest, status, heading, notes, editor;
   let activeInput = null, activePrompt = '', activeToken = '', activeMode = '', activeGame = null;
   let rows = [], selection = -1, cycle = null, applying = false, scheduled = false;
   let hidden = false, collapsed = false, revision = 0, lastSignature = '';
@@ -114,7 +114,8 @@
     if (!prompt || typeof answer !== 'string' || answer.length > 256 || !(tier in SCORES)) return;
     const key = norm(prompt), word = norm(answer);
     const bank = state.learned[key] ||= {};
-    bank[word] = [answer, tier];
+    // ponytail: counts every observed pass; a reconnect snapshot can replay and double-count.
+    bank[word] = [answer, tier, (Number(bank[word]?.[2]) || 0) + 1];
     const words = Object.keys(bank);
     if (words.length > 300) words.slice(0, words.length - 300).forEach(item => delete bank[item]);
     persist();
@@ -285,20 +286,20 @@
     const used = puffer ? usedByCategory.get(activeToken) : null;
     const bad = puffer ? badByCategory.get(activeToken) : null;
     const maxLength = input?.maxLength > 0 ? input.maxLength : (puffer ? 60 : 256);
-    function add(answer, tier, source) {
+    function add(answer, tier, source, seen = null) {
       if (typeof answer !== 'string' || !answer.trim() || answer.length > maxLength) return;
       const word = norm(answer);
       if (used?.has(word) || bad?.has(word)) return;
       const previous = bank.get(word);
       if (previous && previous.source === 'Puffer ✓') return;
-      const count = context ? popularity.get(context.source)?.[context.prompt.id]?.[answer] : null;
+      const count = context ? popularity.get(context.source)?.[context.prompt.id]?.[answer] : seen;
       bank.set(word, { answer, tier, score: SCORES[tier] ?? null, source, count: Number.isFinite(count) ? count : null, order: bank.size });
     }
     if (puffer) {
       const seed = offline.get(key);
       seed?.answers.forEach(([answer, tier]) => add(answer, tier, 'daily sample'));
       for (const sheet of sheets.values()) sheet.get(key)?.answers.forEach(([answer, tier]) => add(answer, tier, 'daily/pack sheet'));
-      Object.values(state.learned[key] || {}).forEach(([answer, tier]) => add(answer, tier, 'Puffer ✓'));
+      Object.values(state.learned[key] || {}).forEach(([answer, tier, seen]) => add(answer, tier, 'Puffer ✓', seen ?? 1));
     } else {
       const live = context && sheets.get(context.source)?.get(key);
       if (live) live.answers.forEach(([answer, tier]) => add(answer, tier, 'sheet'));
@@ -307,13 +308,25 @@
     (Array.isArray(state.custom[key]) ? state.custom[key] : []).forEach(answer => {
       if (!bank.has(norm(answer))) add(answer, null, 'custom ?');
     });
-    (aiAnswers.get(aiKey(prompt, puffer ? 60 : 256)) || []).forEach(answer => {
+    const ai = aiAnswers.get(aiKey(prompt, puffer ? 60 : 256)) || [];
+    ai.forEach(answer => {
       if (!bank.has(norm(answer))) add(answer, null, 'AI guess ?');
     });
-    return Array.from(bank.values()).sort((a, b) => (b.score ?? -1) - (a.score ?? -1)
+    // AI lists answers common-first, so its position ranks known answers within a tier too.
+    const aiRank = new Map(ai.map((answer, index) => [norm(answer), index]));
+    const rank = item => aiRank.get(norm(item.answer)) ?? Infinity;
+    // ponytail: samples/old sheets have no per-answer counts within a tier; shorter, fewer-word answers
+    // stand in as "more common". Replace if the game ever publishes per-answer counts for past days.
+    const words = item => item.answer.trim().split(/\s+/).length;
+    // Least niche first: lowest tier score, then what others said most (daily submission counts / Puffer passes seen).
+    // Unscored custom/AI guesses go last in their given order.
+    return Array.from(bank.values()).sort((a, b) => Number(a.score === null) - Number(b.score === null)
       || (a.score === null && b.score === null ? a.order - b.order : 0)
+      || a.score - b.score
+      || (b.count ?? 0) - (a.count ?? 0)
       || Number(b.source === 'Puffer ✓') - Number(a.source === 'Puffer ✓')
-      || (a.count ?? Infinity) - (b.count ?? Infinity)
+      || (rank(a) === rank(b) ? 0 : rank(a) - rank(b))
+      || words(a) - words(b) || a.answer.length - b.answer.length
       || a.answer.localeCompare(b.answer, 'en'));
   }
   function filter(all, query) {
@@ -381,6 +394,7 @@
     if (changedPrompt) {
       activeInput = input; activePrompt = prompt; activeToken = token; activeMode = mode;
       cycle = null; selection = -1; hidden = false; editor.hidden = true;
+      list.scrollTop = 0; host.scrollTop = 0; // New category: show the most common rows first.
       shadow.querySelector('.edit').textContent = 'Add words';
     }
     activeGame = contextFor(prompt);
@@ -420,28 +434,37 @@
     if (storageWarning) status.textContent += ' · storage blocked';
     const error = activeGame && failures.get(activeGame.source);
     notes.textContent = puffer
-      ? 'Scores from daily/pack sheets unless marked Puffer ✓. Catalogs may differ. Observed repeats hidden; earlier repeats may be unknown.'
-      : error ? `Live sheet unavailable (${error}); samples only.` : 'Highest score first; lower known daily submission count breaks ties. No auto-submit.';
+      ? 'Least niche first: lowest score, then answers others passed most. Scores from daily/pack sheets unless marked Puffer ✓. Catalogs may differ. Observed repeats hidden; earlier repeats may be unknown.'
+      : error ? `Live sheet unavailable (${error}); samples only.` : 'Least niche first: lowest score, then highest daily submission count. No auto-submit.';
     list.replaceChildren();
     if (!rows.length) {
       const empty = document.createElement('p');
       empty.textContent = all.length ? 'No matches. Shorten prefix.' : 'No exact bank match yet. Try AI guesses, add words, or learn from normal Puffer passes.';
       list.append(empty);
     }
-    const start = Math.max(0, selection - 4);
-    rows.slice(start, start + 8).forEach((item, offset) => {
-      const index = start + offset, button = document.createElement('button');
+    const row = index => {
+      const item = rows[index], button = document.createElement('button');
       button.type = 'button'; button.className = `candidate${index === selection ? ' selected' : ''}`;
       button.disabled = input.disabled || input.readOnly;
       const word = document.createElement('span'); word.textContent = item.answer;
       const badge = document.createElement('small');
-      badge.textContent = `${item.score ?? '?'} · ${item.source}${item.count !== null ? ` · ${item.count.toLocaleString()} uses` : ''}`;
+      badge.textContent = `${item.score ?? '?'} · ${item.source}${item.count !== null ? ` · ${item.count.toLocaleString()} ${puffer ? 'seen' : 'uses'}` : ''}`;
       button.title = `${item.answer} — ${item.tier || 'unverified'} (${item.source})`;
       button.append(word, badge);
       button.addEventListener('mousedown', event => event.preventDefault());
       button.addEventListener('click', () => choose(index));
-      list.append(button);
+      return button;
+    };
+    // Rarest matching scored answer gets its own spot above the common-first list.
+    let rare = -1;
+    rows.forEach((item, index) => {
+      const best = rows[rare];
+      if (item.score !== null && (!best || item.score > best.score || (item.score === best.score && (item.count ?? 0) < (best.count ?? 0)))) rare = index;
     });
+    rarest.hidden = rare < 0 || rows.length < 2;
+    rarest.replaceChildren(...(rarest.hidden ? [] : [Object.assign(document.createElement('p'), { textContent: 'RAREST' }), row(rare)]));
+    const start = Math.max(0, selection - 4);
+    rows.slice(start, start + 8).forEach((item, offset) => list.append(row(start + offset)));
     // Keep keyboard selection visible without scrolling chat history or the page.
     const selected = list.querySelector('.selected');
     if (selected) {
@@ -491,7 +514,8 @@
       .unofficial { color:#ffd166; font-size:10px; } .status { color:#a7c5d8; font-size:11px; margin:7px 0; }
       .list { max-height:34vh; overflow:auto; } .candidate { display:flex; flex-direction:column; gap:1px; width:100%; background:transparent; text-align:left; margin:2px 0; overflow-wrap:anywhere; }
       .candidate small { color:#a7c5d8; font-size:10px; } .candidate.selected,.candidate:hover { background:#224a62; }
-      .candidate.selected small { color:#ffd166; } .hint,.notes,.credit { font-size:10px; color:#a7c5d8; margin:7px 0; } .tools { display:flex; gap:7px; } .tools button { font-size:11px; }
+      .candidate.selected small { color:#ffd166; }
+      .rarest { border:1px solid #ffd16688; border-radius:6px; padding:2px 4px; margin-bottom:6px; } .rarest p { margin:2px 2px 0; font-size:10px; letter-spacing:1px; color:#ffd166; } .hint,.notes,.credit { font-size:10px; color:#a7c5d8; margin:7px 0; } .tools { display:flex; gap:7px; } .tools button { font-size:11px; }
       a { color:#a7c5d8; } textarea { margin:7px 0; width:100%; height:100px; background:#102536; color:#e4f3ff; font:12px/1.4 monospace; border:1px solid #486d84; }
       :host([data-placement="waiting"]) { display:none; }
       .information summary { cursor:pointer; color:#a7c5d8; }
@@ -506,6 +530,7 @@
       :host([data-placement="chat"]) .list { position:relative; max-height:min(144px,20dvh); overflow:auto; overscroll-behavior:contain; scrollbar-width:thin; }
       :host([data-placement="chat"]) .candidate { font-size:16px; line-height:1.05; padding:4px 6px; margin:0; border-radius:0; border-left:2px solid transparent; }
       :host([data-placement="chat"]) .candidate small { font-size:12px; color:#8fa3c4; }
+      :host([data-placement="chat"]) .rarest { border-radius:0; border-color:#ffd16655; } :host([data-placement="chat"]) .rarest p { font-size:12px; }
       :host([data-placement="chat"]) .candidate.selected,:host([data-placement="chat"]) .candidate:hover { background:#102d43; border-left-color:#4de3ff; }
       :host([data-placement="chat"]) .candidate.selected small { color:#4de3ff; }
       :host([data-placement="chat"]) .tools { flex-wrap:wrap; gap:4px; }
@@ -514,14 +539,14 @@
       :host([data-placement="chat"]) .hint,:host([data-placement="chat"]) .notes,:host([data-placement="chat"]) .credit { font-size:13px; color:#8fa3c4; }
       :host([data-placement="chat"]) textarea { font-family:inherit; font-size:16px; }
     </style><section hidden aria-label="Krillion autocomplete helper">
-      <header><button type="button" class="heading">Niche Tab ▾</button><span class="unofficial">UNOFFICIAL</span></header>
-      <div class="content"><p class="status"></p><div class="list"></div>
+      <header><button type="button" class="heading">Common Tab ▾</button><span class="unofficial">UNOFFICIAL</span></header>
+      <div class="content"><p class="status"></p><div class="rarest" hidden></div><div class="list"></div>
       <p class="ai-status notes"></p><div class="tools"><button type="button" class="ai">AI guesses</button><button type="button" class="edit">Add words</button><button type="button" class="export">Export learned</button></div>
       <div class="editor" hidden><p>Extra guesses for this exact prompt, one per line. No score implied.</p><textarea aria-label="Custom answers"></textarea><button type="button" class="save">Save</button></div>
       <details class="information" open><summary>Help &amp; data</summary><p class="hint">Tab / Shift+Tab cycle · ↑↓ cycle · Enter stays manual · Esc hides. Click header to fold.</p>
       <p class="notes"></p><p class="credit">Seed: KrillionHQ (2026), <a href="https://github.com/StruggleYang/krillion-dataset" target="_blank" rel="noopener">Daily Dive Dataset</a> · <a href="https://creativecommons.org/licenses/by/4.0/" target="_blank" rel="noopener">CC BY 4.0</a>. Converted; incomplete samples.</p></details></div>
     </section>`;
-    panel = shadow.querySelector('section'); list = shadow.querySelector('.list'); status = shadow.querySelector('.status');
+    panel = shadow.querySelector('section'); list = shadow.querySelector('.list'); rarest = shadow.querySelector('.rarest'); status = shadow.querySelector('.status');
     heading = shadow.querySelector('.heading'); notes = shadow.querySelector('.information .notes'); editor = shadow.querySelector('.editor');
     heading.addEventListener('click', () => { collapsed = !collapsed; render(true); });
     shadow.querySelector('.ai').addEventListener('click', () => requestAI(activePrompt, activeMode === 'Puffer' ? 60 : 256, true));

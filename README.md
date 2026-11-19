@@ -19,9 +19,9 @@ For AI suggestions, add an [OpenRouter API key](https://openrouter.ai/settings/k
 - **Add words**: save your own guesses.
 - **Export learned**: download learned answers and custom words.
 
-Suggestions come from public answer sheets, historical samples, and accepted answers seen while playing. Known scores rank first. Puffer may use a different answer catalog; AI and custom guesses are unverified. Answers already used are excluded when observed, but joining mid-round can miss earlier answers.
+Suggestions come from public answer sheets, historical samples, and accepted answers seen while playing. Least niche answers rank first: lowest score, then what other players said most (daily submission counts, or Puffer passes seen). The rarest matching answer also gets its own box above the list. Puffer may use a different answer catalog; AI and custom guesses are unverified. Answers already used are excluded when observed, but joining mid-round can miss earlier answers.
 
-AI fallback runs for unknown categories, not on each keystroke, and lists the most niche guesses first. It can be switched off in the Violentmonkey menu.
+AI fallback runs for unknown categories, not on each keystroke, and lists the most common guesses first. It can be switched off in the Violentmonkey menu.
 
 ## Privacy
 
