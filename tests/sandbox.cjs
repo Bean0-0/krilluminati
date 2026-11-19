@@ -8,7 +8,7 @@ const testKey = 'sk-or-v1-' + 'x'.repeat(32);
 function harness({key=testKey,status=200,never=false,fastTimers=false,legacyCache=null,content='{"answers":["Painite"," painite ","Benitoite",3,"bad\\nword"]}',delay=0}={}) {
   const values=new Map(),requests=[],messages=[],listeners=[],injected=[];
   if(key)values.set('openrouterKey',key);
-  if(legacyCache)values.set('openrouterCache:v1',legacyCache);
+  if(legacyCache)values.set('openrouterCache:v2',legacyCache);
   const window={addEventListener:(type,fn)=>listeners.push(fn),postMessage:data=>messages.push(data),prompt:()=>null,alert:()=>{}};
   const ctx={window,location:{origin:'https://krillion.io'},crypto:{randomUUID},Promise,Date,Map,Set,JSON,
     setTimeout:(fn,ms)=>setTimeout(fn,fastTimers&&ms>=25000?20:ms),clearTimeout,
@@ -35,8 +35,8 @@ function harness({key=testKey,status=200,never=false,fastTimers=false,legacyCach
   assert.equal(body.max_tokens,1000);
   assert.deepEqual(body.provider.max_price,{prompt:0,completion:0,request:0});
   assert(!body.models&&!body.plugins);
-  assert.match(body.messages[0].content,/most niche and obscure to most common/);
-  assert.match(body.messages[0].content,/already sorted niche-first/);
+  assert.match(body.messages[0].content,/most common to most niche/);
+  assert.match(body.messages[0].content,/already sorted most-common-first/);
   assert(!h.injected.join('').includes(testKey),'Key must not enter injected page code');
   assert(!JSON.stringify(h.messages).includes(testKey),'Key must not enter page messages');
   await h.ctx.complete('  NAME A MINERAL ',60);assert.equal(h.requests.length,1,'Repeated category uses cache');
@@ -45,7 +45,7 @@ function harness({key=testKey,status=200,never=false,fastTimers=false,legacyCach
   await assert.rejects(h.ctx.complete('Name one more mineral',60),/3 AI requests per minute/);
   const old=harness({legacyCache:{'60:name a mineral':{at:Date.now(),answers:['Old common guess']}}});
   assert.deepEqual(Array.from((await old.ctx.complete('Name a mineral',60)).answers),['Painite','Benitoite']);
-  assert.equal(old.requests.length,1,'Old prompt-version cache must not mask niche-first instruction');
+  assert.equal(old.requests.length,1,'Old prompt-version cache must not mask common-first instruction');
   const queued=harness({delay:10});
   await Promise.all([queued.ctx.complete('Category A',60),queued.ctx.complete('Category B',60)]);
   assert.equal(queued.requests.length,2,'Category B queues rather than permanently failing busy');
