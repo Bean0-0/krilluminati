@@ -42,7 +42,7 @@ function harness({key=testKey,status=200,never=false,fastTimers=false,legacyCach
   await h.ctx.complete('  NAME A MINERAL ',60);assert.equal(h.requests.length,1,'Repeated category uses cache');
   await h.ctx.complete('Name a mineral',256);assert.equal(h.requests.length,2,'Length limit participates in cache identity');
   await h.ctx.complete('Name another mineral',60);assert.equal(h.requests.length,3);
-  await assert.rejects(h.ctx.complete('Name one more mineral',60),/3 AI requests per minute/);
+  const minute=harness();minute.values.set('openrouterUsage:v1',Array(15).fill(Date.now()-1000));await assert.rejects(minute.ctx.complete('Name one more mineral',60),/15 AI requests per minute/);
   const old=harness({legacyCache:{'60:name a mineral':{at:Date.now(),answers:['Old common guess']}}});
   assert.deepEqual(Array.from((await old.ctx.complete('Name a mineral',60)).answers),['Painite','Benitoite']);
   assert.equal(old.requests.length,1,'Old prompt-version cache must not mask common-first instruction');
@@ -52,7 +52,7 @@ function harness({key=testKey,status=200,never=false,fastTimers=false,legacyCach
   const missing=harness({key:''});await assert.rejects(missing.ctx.complete('Category',60),/Set OpenRouter key/);assert.equal(missing.requests.length,0);
   const malformed=harness({content:'{"answers":[]}'});await assert.rejects(malformed.ctx.complete('Category',60),/malformed or empty/);assert.equal(malformed.requests.length,1);
   const limited=harness({status:429});await assert.rejects(limited.ctx.complete('Category',60),/HTTP 429/);assert.equal(limited.requests.length,1,'No automatic upstream retries');
-  const daily=harness();daily.values.set('openrouterUsage:v1',Array(40).fill(Date.now()-120000));await assert.rejects(daily.ctx.complete('Category',60),/40 AI requests/);
+  const daily=harness();daily.values.set('openrouterUsage:v1',Array(900).fill(Date.now()-120000));await assert.rejects(daily.ctx.complete('Category',60),/900 AI requests/);
   const stalled=harness({never:true,fastTimers:true});
   await assert.rejects(stalled.ctx.complete('Stalled category',60),/network timed out/);
   await assert.rejects(stalled.ctx.complete('Next category',60),/network timed out/);

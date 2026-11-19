@@ -81,10 +81,11 @@ function fetchAnswers(prompt, maxLength, cacheKey) {
   if (!key) return Promise.reject(new Error('Set OpenRouter key in Violentmonkey menu first.'));
   const now = Date.now();
   let usage = GM_getValue('openrouterUsage:v1', []);
+  // ponytail: 900/day, 15/min sit under OpenRouter free limits (1000/day with $10+ credits bought, 20/min). Accounts without credits get 50/day upstream.
   if (!Array.isArray(usage)) usage = [];
   usage = usage.filter(time => Number.isFinite(time) && now - time < 86400000 && time <= now);
-  if (usage.length >= 40) return Promise.reject(new Error('Local limit: 40 AI requests per rolling 24 hours.'));
-  if (usage.filter(time => now - time < 60000).length >= 3) return Promise.reject(new Error('Local limit: 3 AI requests per minute. Wait, then retry.'));
+  if (usage.length >= 900) return Promise.reject(new Error('Local limit: 900 AI requests per rolling 24 hours.'));
+  if (usage.filter(time => now - time < 60000).length >= 15) return Promise.reject(new Error('Local limit: 15 AI requests per minute. Wait, then retry.'));
   // Count attempts, including upstream failures. No silent retry, paid model fallback, or plugins.
   GM_setValue('openrouterUsage:v1', [...usage, now]);
   let control;
